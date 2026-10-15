@@ -101,7 +101,7 @@ section.view.on { display: flex; }
 /* ---- tables */
 .table-wrap { flex: 1; min-height: 0; overflow: auto; background: var(--panel); border: 1px solid var(--line);
               border-radius: var(--radius); box-shadow: var(--shadow); }
-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+table { width: 100%; min-width: 760px; border-collapse: collapse; table-layout: fixed; }  /* narrow window: scroll, never squeeze the title away */
 th { position: sticky; top: 0; z-index: 1; background: var(--panel); text-align: left; font-weight: 600; color: var(--muted);
      font-size: 12px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 td { padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -258,10 +258,10 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
       <button class="btn" data-act="cancel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>中止</button>
       <button class="btn" data-act="retry"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>再試行</button>
       <button class="btn" data-act="clear">完了・中止を消す</button>
-      <span class="note">選んだものに対して動きます（選んでいなければ全部）</span>
+      <span class="note">選んだもの（未選択なら全部）が対象</span>
     </div>
     <div class="table-wrap"><table id="queue">
-      <colgroup><col style="width:36px"><col><col style="width:200px"><col style="width:96px"><col style="width:90px"><col style="width:280px"></colgroup>
+      <colgroup><col style="width:36px"><col style="min-width:220px"><col style="width:170px"><col style="width:90px"><col style="width:84px"><col style="width:230px"></colgroup>
       <thead><tr><th class="check"><input type="checkbox" data-all></th><th>タイトル</th><th>ドメイン</th><th>画質</th><th>サイズ</th><th>状態</th></tr></thead>
       <tbody></tbody>
     </table></div>
