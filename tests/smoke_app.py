@@ -111,7 +111,8 @@ def drive(app):
         ('ダウンロードに追加', lambda: app.handle({'cmd': 'enqueue', 'from': 'found', 'ids': ['0']}),
          lambda: states() == [appmod.DONE]),
         ('ブラウザで開く', lambda: app.handle({'cmd': 'openInBrowser', 'url': base + '/js.html'}),
-         lambda: len(app.capture) >= 1 and app.web.Visible and app.web.Width > 100),
+         lambda: len(app.capture) >= 1 and app.web.Visible and app.web.Width > 100
+         and getattr(app.checked.get(base + '/media/js.mp4'), 'size', None) == len(VIDEO)),
         ('「ブラウザで読み込んだ動画」から追加',
          lambda: app.handle({'cmd': 'enqueue', 'from': 'captured', 'ids': [base + '/media/js.mp4']}),
          lambda: states() == [appmod.DONE, appmod.DONE]),
@@ -121,6 +122,8 @@ def drive(app):
         ('スクリーンショット（見つかった動画）', lambda: screenshot('found'), lambda: 'found' in shots),
         ('スクリーンショット（ダウンロード一覧）', lambda: app.send('tab', name='queue'), lambda: True),
         ('', lambda: screenshot('queue'), lambda: 'queue' in shots),
+        ('スクリーンショット（ブラウザで読み込んだ動画）', lambda: app.send('tab', name='captured'), lambda: True),
+        ('', lambda: screenshot('captured'), lambda: 'captured' in shots),
     ]
     state = {'i': -1, 'since': time.time()}
     timer = appmod.Timer()

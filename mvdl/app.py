@@ -14,11 +14,13 @@ import queue
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import clr  # pythonnet
 
 from . import __version__
+from . import probe
 from .capture import Capture, is_media
 from .downloader import QUALITIES, Cancelled, download
 from .finder import Blocked, Candidate, find_in_page, find_videos, fmt_duration, fmt_size, kind_of
@@ -103,6 +105,8 @@ class App:
     def __init__(self, start_url=None):
         self.q = queue.Queue()        # (kind, payload) from worker threads, drained by a UI timer
         self.capture = Capture()
+        self.checked = {}             # captured url -> Candidate after the check (resolution / size ...)
+        self.checker = ThreadPoolExecutor(2)  # checks of what the browser loaded: two at a time
         self.searching = False
         self.cands = []
         self.jobs = {}                # id -> Job, in the order they were added
@@ -283,6 +287,7 @@ class App:
     def on_navigation(self, sender, e):
         if not e.IsRedirected:  # a new page: what the previous one loaded no longer counts
             self.capture.reset()
+            self.checked.clear()
             self.send('capturedReset')
 
     def on_response(self, sender, e):
@@ -293,10 +298,26 @@ class App:
             return
         m = self.capture.add(uri, mime, {kv.Key: kv.Value for kv in e.Request.Headers})
         if m:
-            kind = kind_of(m.url)
-            self.send('captured', item={'id': m.url, 'url': m.url, 'mime': m.mime or '—',
-                                        'kind': 'mp4' if kind == '動画' else kind,
-                                        'time': time.strftime('%H:%M:%S', time.localtime(m.at))})
+            self.send_captured(m, {'check': '確認中…'})
+            [cand] = self.capture.candidates(self.core.Source, self.core.DocumentTitle, self.core.Settings.UserAgent,
+                                             urls={m.url})
+            self.checker.submit(self.check_captured, m, cand)
+
+    def send_captured(self, m, info):
+        kind = kind_of(m.url)
+        self.send('captured', item={'id': m.url, 'url': m.url, 'mime': m.mime or '—',
+                                    'kind': 'mp4' if kind == '動画' else kind,
+                                    'time': time.strftime('%H:%M:%S', time.localtime(m.at)),
+                                    'resolution': '—', 'duration': '—', 'size': '—', 'note': ''} | info)
+
+    def check_captured(self, m, cand):
+        """Worker: resolution / duration / size of one captured video (same check as the search)."""
+        notes = []
+        try:
+            c, _ = probe.check(cand, notes.append)
+        except Exception as e:  # noqa: BLE001
+            c, notes = None, [str(e)]
+        self.q.put(('checked', (m, c, notes[-1] if notes else '')))
 
     def on_new_window(self, sender, e):
         """Links that open a new tab stay in this browser (so their videos are seen). Sized pop-ups
@@ -438,6 +459,17 @@ class App:
                     self.set_searching(False)
                     self.status('Cloudflare の確認画面（ボット対策）で止められました')
                     self.send('blocked', url=v)
+                elif kind == 'checked':
+                    m, c, note = v
+                    if self.capture.media.get(m.url) is m:  # still the page it came from
+                        if c is not None:
+                            self.checked[m.url] = c
+                        self.send_captured(m, {
+                            'check': '動画ではない' if c is None else '未確認' if '未確認' in c.source else '確認済み',
+                            'note': note,
+                            **({} if c is None else {'resolution': c.resolution or '—',
+                                                     'duration': fmt_duration(c.duration),
+                                                     'size': fmt_size(c.size, c.size_approx)})})
                 elif kind == 'job':
                     job_id, frac, text = v
                     job = self.jobs.get(job_id)
@@ -512,7 +544,13 @@ class App:
         def ready(cookies):
             cands = self.capture.candidates(page_url, title, ua, cookies.get, set(urls))
             for c in cands:
-                c.source = 'ブラウザ（未確認）'
+                done = self.checked.get(c.url)
+                if done:  # what the check found (size for the list)
+                    c.resolution, c.duration, c.size, c.size_approx = (done.resolution, done.duration, done.size,
+                                                                       done.size_approx)
+                    c.source = done.source
+                else:
+                    c.source = 'ブラウザ（未確認）'
             self.add_jobs(cands)
 
         self.cookies(urls, ready)

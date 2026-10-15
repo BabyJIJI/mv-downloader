@@ -167,10 +167,10 @@ def _from_generic(info, url, log, headers):
     """yt-dlp's generic extractors found media on an arbitrary page (<video>, <audio>, JSON-LD, ...). Its
     entries all point back at the page, so take each one's media URL and check it like the ones from
     our own HTML scan: audio and anything that is not a video is dropped."""
-    entries = info['entries'] if 'entries' in info else [info]
+    entries = list(info['entries'] or [])[:50] if 'entries' in info else [info]
     referer = {'Referer': info.get('webpage_url') or url}
     out, direct = [], []
-    for e in list(entries or [])[:50]:
+    for e in entries:
         if not e:
             continue
         if e.get('_type') in ('url', 'url_transparent'):  # an embed (YouTube, Vimeo, ...)
@@ -184,7 +184,10 @@ def _from_generic(info, url, log, headers):
             continue
         h = referer | {k: v for k, v in (f.get('http_headers') or {}).items() if k in ('User-Agent', 'Cookie')}
         kind = 'HLS' if 'm3u8' in (f.get('protocol') or '') else kind_of(media)
-        direct.append(Candidate(media, e.get('title') or info.get('title') or url, kind, 'ページ内', h))
+        title = e.get('title') or info.get('title') or url
+        if len(entries) == 1:  # yt-dlp numbers the page's media entries: "Title (1)"
+            title = re.sub(r' \(1\)$', '', title)
+        direct.append(Candidate(media, title, kind, 'ページ内', h))
     from .probe import keep_videos
     seen = set()
     direct = [c for c in direct if not (c.url in seen or seen.add(c.url))]

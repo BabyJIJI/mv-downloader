@@ -6,3 +6,4 @@ dist/
 *.zip
 .pytest_cache/
 mvdl/lib/
+.shots/

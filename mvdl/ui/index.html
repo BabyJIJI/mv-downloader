@@ -119,6 +119,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
          background: var(--accent-soft); color: var(--accent); }
 .badge.gray { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); line-height: 17px; }
 .badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
 .state { display: flex; flex-direction: column; gap: 4px; }
 .state .bar { height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; }
 .state .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
@@ -236,10 +237,10 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
   </section>
 
   <section class="view" data-view="captured">
-    <div class="toolbar"><span class="note">ブラウザが動画として受け取った通信です（中身の確認はしていません）。選んで「ダウンロードに追加」できます。</span></div>
+    <div class="toolbar"><span class="note">ブラウザが動画として受け取った通信です。解像度などは裏で確かめて追記します（「未確認」はこちらから取得できなかったもの。理由はマウスを載せると出ます）。選んで「ダウンロードに追加」できます。</span></div>
     <div class="table-wrap"><table id="captured">
-      <colgroup><col style="width:36px"><col style="width:84px"><col style="width:84px"><col style="width:190px"><col></colgroup>
-      <thead><tr><th class="check"><input type="checkbox" data-all></th><th>時刻</th><th>種類</th><th>Content-Type</th><th>URL</th></tr></thead>
+      <colgroup><col style="width:36px"><col style="width:78px"><col style="width:76px"><col style="width:104px"><col style="width:66px"><col style="width:92px"><col style="width:96px"><col></colgroup>
+      <thead><tr><th class="check"><input type="checkbox" data-all></th><th>時刻</th><th>種類</th><th>解像度</th><th>長さ</th><th>サイズ</th><th>確認</th><th>URL</th></tr></thead>
       <tbody></tbody>
     </table></div>
   </section>
@@ -325,7 +326,7 @@ function paint(t) {
 }
 
 const found = makeTable('found', 6, () => enqueue('found'));
-const captured = makeTable('captured', 4, () => enqueue('captured'));
+const captured = makeTable('captured', 7, () => enqueue('captured'));
 const queue = makeTable('queue', 4, id => send('openFolder', {id}));
 
 const SOURCE = s => s.includes('未確認') ? `<span class="badge warn">${esc(s)}</span>` : `<span class="badge gray">${esc(s)}</span>`;
@@ -335,9 +336,12 @@ function foundRow(v) {
     <td><span class="badge">${esc(v.kind)}</span></td><td class="num">${esc(v.resolution)}</td><td class="num">${esc(v.duration)}</td>
     <td class="num">${esc(v.size)}</td><td>${SOURCE(v.source)}</td>`;
 }
+const CHECK = {'確認済み': 'ok', '未確認': 'warn', '動画ではない': 'gray', '確認中…': 'gray'};
 function capturedRow(v) {
-  return `<td class="num">${esc(v.time)}</td><td><span class="badge">${esc(v.kind)}</span></td><td>${esc(v.mime)}</td>
-    <td title="${esc(v.url)}">${esc(v.url)}</td>`;
+  return `<td class="num">${esc(v.time)}</td><td><span class="badge">${esc(v.kind)}</span></td>
+    <td class="num">${esc(v.resolution)}</td><td class="num">${esc(v.duration)}</td><td class="num">${esc(v.size)}</td>
+    <td title="${esc(v.note || v.check)}"><span class="badge ${CHECK[v.check] || 'gray'}">${esc(v.check)}</span></td>
+    <td title="${esc(v.url)}\n${esc(v.mime)}"><div>${esc(v.url)}</div><div class="sub">${esc(v.mime)}</div></td>`;
 }
 const STATE_CLASS = {'完了': 'done', '失敗': 'failed', '中止': 'failed'};
 function jobRow(v) {
