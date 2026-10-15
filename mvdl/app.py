@@ -14,6 +14,7 @@ import queue
 import sys
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -45,8 +46,8 @@ APP = '動画ダウンローダー'
 DATA = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'mvdl')
 SETTINGS = os.path.join(os.environ.get('APPDATA') or DATA, 'mvdl', 'settings.json')
 WEBVIEW2_RUNTIME = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
-PARALLEL = ('1', '2', '3', '4')
-WAITING, RUNNING, DONE, FAILED, CANCELLED = '待機中', 'ダウンロード中', '完了', '失敗', '中止'
+PARALLEL = tuple(str(n) for n in range(1, 11))
+WAITING, RUNNING, PAUSED, DONE, FAILED, CANCELLED = '待機中', 'ダウンロード中', '一時停止', '完了', '失敗', '中止'
 
 
 def load_settings():
@@ -98,6 +99,7 @@ class Job:
     text: str = ''
     progress: float | None = None
     stop: threading.Event = field(default_factory=threading.Event)
+    pausing: bool = False         # the stop is a pause: keep the partial file and resume later
     files: list = field(default_factory=list)
 
 
@@ -259,6 +261,10 @@ class App:
             self.cancel_jobs(m.get('ids') or [])
         elif cmd == 'retry':
             self.retry_jobs(m.get('ids') or [])
+        elif cmd == 'pause':
+            self.pause_jobs(m.get('ids') or [])
+        elif cmd == 'resume':
+            self.resume_jobs(m.get('ids') or [])
         elif cmd == 'clear':
             self.clear_jobs()
         elif cmd == 'openFolder':
@@ -481,6 +487,7 @@ class App:
                     job = self.jobs.get(job_id)
                     if job:
                         self.set_job_state(job, state, text, 1.0 if state == DONE else job.progress)
+                        job.pausing = False
         except queue.Empty:
             pass
         self.start_jobs()
@@ -488,9 +495,12 @@ class App:
     # ---- download queue -----------------------------------------------------------------------------
     def send_job(self, job):
         c = job.cand
+        host = urllib.parse.urlparse(c.url).hostname or ''
+        page = urllib.parse.urlparse(c.headers.get('Referer') or '').hostname or ''
         self.send('job', item={'id': job.id, 'title': c.title, 'quality': job.quality, 'state': job.state,
                                'size': fmt_size(c.size, c.size_approx), 'text': job.text or job.state,
-                               'progress': job.progress})
+                               'progress': job.progress, 'host': host, 'url': c.url,
+                               'page': page if page and page != host else ''})
 
     def set_job_state(self, job, state, text=None, progress=None):
         job.state, job.text, job.progress = state, text or state, progress
@@ -499,7 +509,7 @@ class App:
 
     def send_stats(self):
         states = [j.state for j in self.jobs.values()]
-        self.send('queueStats', parts=[[s, states.count(s)] for s in (RUNNING, WAITING, DONE, FAILED, CANCELLED)
+        self.send('queueStats', parts=[[s, states.count(s)] for s in (RUNNING, WAITING, PAUSED, DONE, FAILED, CANCELLED)
                                        if states.count(s)])
 
     def start_jobs(self):
@@ -523,7 +533,10 @@ class App:
         try:
             job.files = download(job.cand, job.outdir, job.quality, log, progress, job.stop)
         except Cancelled:
-            self.q.put(('job-end', (job.id, CANCELLED, None)))
+            if job.pausing:  # keep the progress: yt-dlp continues the .part file on resume
+                self.q.put(('job-end', (job.id, PAUSED, f'{PAUSED}（{job.text}）' if job.text else PAUSED)))
+            else:
+                self.q.put(('job-end', (job.id, CANCELLED, None)))
             return
         except Exception as e:  # noqa: BLE001 - shown in the list and the log
             msg = str(e).replace('ERROR: ', '')
@@ -573,14 +586,36 @@ class App:
         self.start_jobs()
 
     def cancel_jobs(self, ids):
-        ids = [i for i in ids if i in self.jobs] or [j.id for j in self.jobs.values() if j.state in (WAITING, RUNNING)]
+        ids = [i for i in ids if i in self.jobs] or [j.id for j in self.jobs.values()
+                                                     if j.state in (WAITING, RUNNING, PAUSED)]
         for job in (self.jobs[i] for i in ids):
-            if job.state == WAITING:
+            if job.state in (WAITING, PAUSED):
                 self.set_job_state(job, CANCELLED)
             elif job.state == RUNNING:
+                job.pausing = False
                 job.stop.set()
                 job.text = '中止しています…'
                 self.send_job(job)
+
+    def pause_jobs(self, ids):
+        """Selected (or all) waiting / running downloads: stop for now, resume later where they were."""
+        ids = [i for i in ids if i in self.jobs] or [j.id for j in self.jobs.values() if j.state in (WAITING, RUNNING)]
+        for job in (self.jobs[i] for i in ids):
+            if job.state == WAITING:
+                self.set_job_state(job, PAUSED, progress=job.progress)
+            elif job.state == RUNNING:
+                job.pausing = True
+                job.stop.set()
+                job.text = '一時停止しています…'
+                self.send_job(job)
+
+    def resume_jobs(self, ids):
+        ids = [i for i in ids if i in self.jobs] or [j.id for j in self.jobs.values() if j.state == PAUSED]
+        for job in (self.jobs[i] for i in ids):
+            if job.state == PAUSED:
+                job.stop = threading.Event()
+                self.set_job_state(job, WAITING, progress=job.progress)
+        self.start_jobs()
 
     def retry_jobs(self, ids):
         for job in (self.jobs[i] for i in ids if i in self.jobs):
@@ -623,8 +658,8 @@ class App:
                        'last_url': self.core.Source if self.core else self.settings.get('last_url', '')})
 
     def on_closing(self, sender, e):
-        left = sum(j.state in (WAITING, RUNNING) for j in self.jobs.values())
-        if left and MessageBox.Show(f'ダウンロードが {left} 件残っています。中止して終了しますか？', APP,
+        left = sum(j.state in (WAITING, RUNNING, PAUSED) for j in self.jobs.values())
+        if left and MessageBox.Show(f'ダウンロードが {left} 件残っています（一時停止を含む）。中止して終了しますか？', APP,
                                     MessageBoxButtons.YesNo) != DialogResult.Yes:
             e.Cancel = True
             return

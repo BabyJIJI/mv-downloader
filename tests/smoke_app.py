@@ -30,6 +30,8 @@ mvdl.probe.find_tool = lambda name: None  # placeholder bytes below: judge by Co
 from mvdl import app as appmod  # noqa: E402
 
 VIDEO = b'\x00\x00\x00\x18ftypmp42' + b'\x00' * 100_000
+SLOW = b'\x00\x00\x00\x18ftypmp42' + bytes(range(256)) * 1200  # sent in small pieces, with pauses
+RANGES = []  # Range headers of the slow file's requests (a resume asks for the rest)
 PAGES = {
     '/video.html': '<title>Video page</title><video src="/media/plain.mp4"></video>',
     '/js.html': '<title>JS page</title><div id=p></div><script>document.cookie = "sess=abc; path=/";'
@@ -44,6 +46,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self.path.split('?')[0]
+        if p == '/media/slow.mp4':
+            rng = self.headers.get('Range') or ''
+            RANGES.append(rng)
+            start = int(rng[6:].split('-')[0]) if rng.startswith('bytes=') and rng[6:].split('-')[0] else 0
+            self.send_response(206 if start else 200)
+            self.send_header('Content-Type', 'video/mp4')
+            self.send_header('Accept-Ranges', 'bytes')
+            self.send_header('Content-Length', str(len(SLOW) - start))
+            if start:
+                self.send_header('Content-Range', f'bytes {start}-{len(SLOW) - 1}/{len(SLOW)}')
+            self.end_headers()
+            if self.command == 'GET':
+                try:
+                    for i in range(start, len(SLOW), 16384):
+                        self.wfile.write(SLOW[i:i + 16384])
+                        time.sleep(0.25)
+                except OSError:  # the client stopped (pause)
+                    pass
+            return
         if p.startswith('/media/'):
             data, ctype = VIDEO, 'video/mp4'
         elif p in PAGES:
@@ -85,6 +106,7 @@ def drive(app):
 
     app.browser_missing = lambda err: fail(f'WebView2 failed: {err}')
     found = lambda: [c.url for c in app.cands]  # noqa: E731
+    job = lambda title: next((j for j in app.jobs.values() if j.cand.title == title), None)  # noqa: E731
     states = lambda: [j.state for j in app.jobs.values()]  # noqa: E731
     view = {}
 
@@ -118,6 +140,13 @@ def drive(app):
          lambda: states() == [appmod.DONE, appmod.DONE]),
         ('ブラウザのページから探す', lambda: app.handle({'cmd': 'findPage'}),
          lambda: not app.searching and found() == [base + '/media/js.mp4']),
+        ('一時停止', lambda: app.add_jobs([appmod.Candidate(base + '/media/slow.mp4', 'Slow', 'mp4', 'ページ内',
+                                                           {'Referer': base + '/video.html'})]),
+         lambda: getattr(job('Slow'), 'state', None) == appmod.RUNNING and (job('Slow').progress or 0) > 0.2
+         and not app.handle({'cmd': 'pause', 'ids': [job('Slow').id]})),
+        ('', lambda: None, lambda: job('Slow').state == appmod.PAUSED),
+        ('再開', lambda: app.handle({'cmd': 'resume', 'ids': [job('Slow').id]}),
+         lambda: job('Slow').state == appmod.DONE),
         ('画面の表示', ask_page, lambda: bool(view)),
         ('スクリーンショット（見つかった動画）', lambda: screenshot('found'), lambda: 'found' in shots),
         ('スクリーンショット（ダウンロード一覧）', lambda: app.send('tab', name='queue'), lambda: True),
@@ -157,7 +186,10 @@ appmod.run(setup=drive)
 print('\n'.join(logs))
 assert not result['errors'], '\n'.join(result['errors'])
 assert result['step'] == 'done', result
-assert len([f for f in os.listdir(outdir) if f.endswith('.mp4')]) == 2, os.listdir(outdir)
+assert len([f for f in os.listdir(outdir) if f.endswith('.mp4')]) == 3, os.listdir(outdir)
+with open(os.path.join(outdir, 'Slow.mp4'), 'rb') as fh:
+    assert fh.read() == SLOW, 'resumed file differs'
+assert any(r.startswith('bytes=') and not r.startswith('bytes=0-') for r in RANGES), RANGES  # resumed, not restarted
 assert result['js_cookie'] and 'sess=abc' in result['js_cookie'], result['js_cookie']
-assert result['view'] == {'tab': 'found', 'found': 1, 'captured': 1, 'queue': 2}, result['view']
+assert result['view'] == {'tab': 'found', 'found': 1, 'captured': 1, 'queue': 3}, result['view']
 print('app ok')

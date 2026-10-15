@@ -126,6 +126,8 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
 .state.done .bar > i { background: var(--ok); }
 .state.failed .label { color: var(--bad); }
 .state.done .label { color: var(--ok); }
+.state.paused .label { color: var(--warn); }
+.state.paused .bar > i { background: var(--warn); }
 .state .label { font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
 .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--faint);
          padding: 48px 16px; text-align: center; }
@@ -188,7 +190,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
     </label>
     <div class="row">
       <label class="field grow">画質<select id="quality"></select></label>
-      <label class="field" style="width:96px">同時に<select id="parallel"></select></label>
+      <label class="field" style="width:96px" title="同じサイトへの接続が増えるほど、アクセス制限に掛かりやすくなります">同時に<select id="parallel"></select></label>
     </div>
     <button class="btn primary block" id="enqueue">選んだ動画をダウンロードに追加</button>
     <div class="hint warn" id="ffmpeg-note" hidden>ffmpeg がないため、高画質の動画は保存できないことがあります</div>
@@ -197,10 +199,14 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
   <div class="card">
     <h2>ダウンロード一覧</h2>
     <div class="stats" id="queue-stats"><span class="chip">まだありません</span></div>
-    <div class="row">
-      <button class="btn grow" id="cancel">中止</button>
-      <button class="btn grow" id="retry">再試行</button>
-      <button class="btn grow" id="clear">完了を消す</button>
+    <div class="row" data-queue-actions>
+      <button class="btn grow" data-act="pause">一時停止</button>
+      <button class="btn grow" data-act="resume">再開</button>
+      <button class="btn grow" data-act="cancel">中止</button>
+    </div>
+    <div class="row" data-queue-actions>
+      <button class="btn grow" data-act="retry">再試行</button>
+      <button class="btn grow" data-act="clear">完了・中止を消す</button>
     </div>
     <button class="btn block" id="open-folder">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -246,9 +252,17 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
   </section>
 
   <section class="view" data-view="queue">
+    <div class="toolbar" data-queue-actions>
+      <button class="btn" data-act="pause"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>一時停止</button>
+      <button class="btn" data-act="resume"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5v14l12-7z"/></svg>再開</button>
+      <button class="btn" data-act="cancel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>中止</button>
+      <button class="btn" data-act="retry"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>再試行</button>
+      <button class="btn" data-act="clear">完了・中止を消す</button>
+      <span class="note">選んだものに対して動きます（選んでいなければ全部）</span>
+    </div>
     <div class="table-wrap"><table id="queue">
-      <colgroup><col style="width:36px"><col><col style="width:100px"><col style="width:96px"><col style="width:300px"></colgroup>
-      <thead><tr><th class="check"><input type="checkbox" data-all></th><th>タイトル</th><th>画質</th><th>サイズ</th><th>状態</th></tr></thead>
+      <colgroup><col style="width:36px"><col><col style="width:200px"><col style="width:96px"><col style="width:90px"><col style="width:280px"></colgroup>
+      <thead><tr><th class="check"><input type="checkbox" data-all></th><th>タイトル</th><th>ドメイン</th><th>画質</th><th>サイズ</th><th>状態</th></tr></thead>
       <tbody></tbody>
     </table></div>
   </section>
@@ -327,7 +341,7 @@ function paint(t) {
 
 const found = makeTable('found', 6, () => enqueue('found'));
 const captured = makeTable('captured', 7, () => enqueue('captured'));
-const queue = makeTable('queue', 4, id => send('openFolder', {id}));
+const queue = makeTable('queue', 5, id => send('openFolder', {id}));
 
 const SOURCE = s => s.includes('未確認') ? `<span class="badge warn">${esc(s)}</span>` : `<span class="badge gray">${esc(s)}</span>`;
 function foundRow(v) {
@@ -343,10 +357,12 @@ function capturedRow(v) {
     <td title="${esc(v.note || v.check)}"><span class="badge ${CHECK[v.check] || 'gray'}">${esc(v.check)}</span></td>
     <td title="${esc(v.url)}\n${esc(v.mime)}"><div>${esc(v.url)}</div><div class="sub">${esc(v.mime)}</div></td>`;
 }
-const STATE_CLASS = {'完了': 'done', '失敗': 'failed', '中止': 'failed'};
+const STATE_CLASS = {'完了': 'done', '失敗': 'failed', '中止': 'failed', '一時停止': 'paused'};
 function jobRow(v) {
   const pct = v.progress == null ? (v.state === '完了' ? 100 : 0) : Math.round(v.progress * 100);
-  return `<td title="${esc(v.title)}"><div class="title">${esc(v.title)}</div></td><td>${esc(v.quality)}</td><td class="num">${esc(v.size)}</td>
+  const page = v.page ? `<div class="sub">ページ: ${esc(v.page)}</div>` : '';
+  return `<td title="${esc(v.title)}"><div class="title">${esc(v.title)}</div></td>
+    <td title="${esc(v.url)}"><div>${esc(v.host)}</div>${page}</td><td>${esc(v.quality)}</td><td class="num">${esc(v.size)}</td>
     <td><div class="state ${STATE_CLASS[v.state] || ''}"><div class="label" title="${esc(v.text || v.state)}">${esc(v.text || v.state)}</div>
     <div class="bar"><i style="width:${pct}%"></i></div></div></td>`;
 }
@@ -384,9 +400,8 @@ function enqueue(from) {
   send('enqueue', {from, ids});
 }
 $('#enqueue').onclick = () => enqueue(tab === 'captured' ? 'captured' : 'found');
-$('#cancel').onclick = () => send('cancel', {ids: queue.selected()});
-$('#retry').onclick = () => send('retry', {ids: queue.selected()});
-$('#clear').onclick = () => send('clear');
+document.querySelectorAll('[data-queue-actions] [data-act]').forEach(b =>
+  b.onclick = () => send(b.dataset.act, b.dataset.act === 'clear' ? {} : {ids: queue.selected()}));
 $('#open-folder').onclick = () => send('openFolder', {id: queue.selected()[0] || null});
 $('#browse').onclick = () => send('browse');
 for (const key of ['outdir', 'quality', 'parallel']) $('#' + key).addEventListener('change', e => send('set', {key, value: e.target.value}));
