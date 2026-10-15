@@ -1,4 +1,4 @@
-"""Locate helper programs: ffmpeg / deno bundled next to the exe, and a Chromium browser (Edge)."""
+"""Locate helper programs: ffmpeg / deno bundled next to the exe, and Chrome (or Edge)."""
 import os
 import shutil
 import sys
@@ -21,20 +21,37 @@ def find_tool(name):
 
 
 def find_browser():
-    """Edge first (always present on Windows), then Chrome. MVDL_BROWSER overrides."""
+    """Chrome first, Edge only when Chrome is not installed. MVDL_BROWSER overrides."""
     if os.environ.get('MVDL_BROWSER'):
         return os.environ['MVDL_BROWSER']
     if os.name == 'nt':
-        roots = [os.environ.get(k) for k in ('ProgramFiles(x86)', 'ProgramFiles', 'LOCALAPPDATA')]
-        rels = [r'Microsoft\Edge\Application\msedge.exe', r'Google\Chrome\Application\chrome.exe']
-        for rel in rels:
-            for root in roots:
+        for exe, rel in (('chrome.exe', r'Google\Chrome\Application\chrome.exe'),
+                         ('msedge.exe', r'Microsoft\Edge\Application\msedge.exe')):
+            found = _app_path(exe)
+            if found:
+                return found
+            for key in ('ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA'):  # LOCALAPPDATA: per-user install
+                root = os.environ.get(key)
                 if root and os.path.isfile(os.path.join(root, rel)):
                     return os.path.join(root, rel)
         return None
-    for name in ('microsoft-edge', 'google-chrome', 'chromium', 'chromium-browser'):
+    for name in ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge'):
         if shutil.which(name):
             return shutil.which(name)
+    return None
+
+
+def _app_path(exe):
+    """Where Windows says the program is installed (App Paths, per user then per machine)."""
+    import winreg
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, rf'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}') as k:
+                path = winreg.QueryValue(k, None).strip('"')
+        except OSError:
+            continue
+        if os.path.isfile(path):
+            return path
     return None
 
 

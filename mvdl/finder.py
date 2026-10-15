@@ -3,7 +3,7 @@
 1. yt-dlp (dedicated extractors for ~1800 sites, plus its generic one)
 2. our own scan of the HTML: <video>/<source>, og:video, media URLs inside scripts, and iframes
    that yt-dlp has an extractor for (YouTube / Vimeo embeds, ...)
-3. (browser.py) open the page in headless Edge, play it, and watch the network
+3. (browser.py) open the page in headless Chrome, play it, and watch the network
 """
 import html.parser
 import re

@@ -1,5 +1,5 @@
-"""For pages that load the player with JavaScript: open the page in Edge, get the video going, and pick
-the media URLs (mp4 / HLS / DASH manifests) out of the network traffic.
+"""For pages that load the player with JavaScript: open the page in Chrome (Edge if no Chrome), get the
+video going, and pick the media URLs (mp4 / HLS / DASH manifests) out of the network traffic.
 
 Headless (automatic): every <video> is started muted, and the play buttons / players are clicked with real
 (trusted) mouse events, since many players only load the video after a click.
@@ -124,10 +124,12 @@ def is_media(url, mime):
     return ext in MEDIA_EXT or mime.startswith(MEDIA_MIME)
 
 
-def profile_dir():
-    """Kept between runs so a passed Cloudflare check or a login carries over."""
+def profile_dir(exe):
+    """Kept between runs so a passed Cloudflare check or a login carries over. One per browser: a profile
+    written by Edge is not meant to be opened by Chrome."""
     base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~/.cache')
-    return os.path.join(base, 'mvdl', 'browser')
+    name = os.path.splitext(os.path.basename(exe))[0].lower()
+    return os.path.join(base, 'mvdl', f'browser-{name}')
 
 
 class LaunchError(RuntimeError):
@@ -170,7 +172,7 @@ def _launch(exe, profile, visible):
 
 
 def _kill_profile_browsers(profile):
-    """End the Edge processes left running on our own profile (a window from an earlier run, or one that
+    """End the browser processes left running on our own profile (a window from an earlier run, or one that
     did not shut down). Only processes whose command line names this profile are touched."""
     if os.name != 'nt':
         return
@@ -192,7 +194,7 @@ def _start(exe, visible, log):
     if not visible:
         profile = tempfile.mkdtemp(prefix='mvdl-')
         return (*_launch(exe, profile, visible), profile, True)
-    profile = profile_dir()
+    profile = profile_dir(exe)
     os.makedirs(profile, exist_ok=True)
     try:
         return (*_launch(exe, profile, visible), profile, False)
@@ -323,8 +325,9 @@ def sniff(url, log, wait=25, settle=4, stop=None, visible=False):
     """
     exe = find_browser()
     if not exe:
-        log('Edge / Chrome が見つからないため、ブラウザでの検索はできません')
+        log('Chrome（または Edge）が見つからないため、ブラウザでの検索はできません')
         return []
+    log(f'使うブラウザ: {exe}')
     if visible:
         wait = 30 * 60
     proc = cdp = None
@@ -335,7 +338,7 @@ def sniff(url, log, wait=25, settle=4, stop=None, visible=False):
         cdp = CDP(version['webSocketDebuggerUrl'])
         ua = cdp.call('Browser.getVersion')['userAgent'].replace('HeadlessChrome', 'Chrome')
         w = _Watch(cdp, url, ua, visible, log)
-        # Our own tab: a visible Edge also has hidden pages (side panel, new-tab preload, ...).
+        # Our own tab: a visible browser also has hidden pages (side panel, new-tab preload, ...).
         w.main_target = cdp.call('Target.createTarget', url='about:blank')['targetId']
         for t in cdp.call('Target.getTargets').get('targetInfos', []):
             if t['type'] == 'page' and t['targetId'] != w.main_target and t.get('url') == 'about:blank':

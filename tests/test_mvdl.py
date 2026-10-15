@@ -241,7 +241,7 @@ def test_download_sends_browser_headers(server, tmp_path):
 def test_visible_browser_falls_back_when_profile_busy(monkeypatch, tmp_path):
     """Profile still used by a leftover browser: end it and retry, then fall back to a temporary profile."""
     import mvdl.browser as b
-    monkeypatch.setattr(b, 'profile_dir', lambda: str(tmp_path / 'keep'))
+    monkeypatch.setattr(b, 'profile_dir', lambda exe: str(tmp_path / 'keep'))
     killed, tried = [], []
     monkeypatch.setattr(b, '_kill_profile_browsers', killed.append)
 

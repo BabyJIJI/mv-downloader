@@ -95,7 +95,7 @@ class App:
         self.stop_btn = ttk.Button(sf, text='中止', command=self.on_stop, state='disabled')
         self.stop_btn.pack(side='left', padx=(6, 0))
         self.use_browser = tk.BooleanVar(value=s.get('use_browser', True))
-        ttk.Checkbutton(f, text='見つからないときは Edge で再生して探す（JavaScript で読み込む動画）',
+        ttk.Checkbutton(f, text='見つからないときは Chrome で再生して探す（JavaScript で読み込む動画）',
                         variable=self.use_browser).grid(row=1, column=1, columnspan=2, sticky='w', pady=(4, 4))
 
         self.bar = ttk.Progressbar(f, maximum=1.0, mode='indeterminate')
@@ -338,7 +338,7 @@ class App:
         self.search(work)
 
     def on_open_browser(self):
-        """Visible Edge: the user passes Cloudflare / logs in and plays the video; we watch the traffic."""
+        """Visible Chrome: the user passes Cloudflare / logs in and plays the video; we watch the traffic."""
         url = self.normalized_url()
         if self.searching or not url:
             return

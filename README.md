@@ -18,17 +18,17 @@ Web ページに埋め込まれた動画を保存する Windows 用の GUI ツ�
 |---|---|---|
 | 1 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | YouTube・Vimeo・X など、yt-dlp が対応する約 1,800 サイト。HTML に `<video>` があるページ |
 | 2 | ページの HTML を読む | `<video>` / `<source>`、`og:video`、スクリプト内の `.mp4` `.m3u8` `.mpd` の URL、YouTube などの埋め込み iframe |
-| 3 | Edge で再生して通信を見る | JavaScript でプレーヤーを読み込むページ、クリックしないと動画が出ないページ。ヘッドレスの Edge でページを開き、動画をミュート再生し、再生ボタンやプレーヤーを本物のマウス操作でクリックして、動画や HLS/DASH マニフェストの URL を拾う。別サイトのプレーヤー（iframe）、クリックで開いた新しいタブ、Worker の通信も見る。Cookie と Referer も引き継ぐ |
+| 3 | Chrome で再生して通信を見る | JavaScript でプレーヤーを読み込むページ、クリックしないと動画が出ないページ。ヘッドレスの Chrome でページを開き、動画をミュート再生し、再生ボタンやプレーヤーを本物のマウス操作でクリックして、動画や HLS/DASH マニフェストの URL を拾う。別サイトのプレーヤー（iframe）、クリックで開いた新しいタブ、Worker の通信も見る。Cookie と Referer も引き継ぐ |
 
-3 は画面の「見つからないときは Edge で再生して探す」で切り替えられる（20 秒ほどかかる）。
+3 は画面の「見つからないときは Chrome で再生して探す」で切り替えられる（20 秒ほどかかる）。
 
 ### Cloudflare の確認画面で止められるとき・ログインが必要なとき
 
-「ブラウザで開いて探す」を押すと、Edge が画面に出る。確認（「人間であることを確認します」など）やログインを自分で済ませ、動画を再生して「完了」を押す（またはブラウザを閉じる）と、その間に読み込まれた動画が一覧に出る。ダウンロードには、そのブラウザが実際に送った Cookie と User-Agent を使う。
+「ブラウザで開いて探す」を押すと、Chrome が画面に出る。確認（「人間であることを確認します」など）やログインを自分で済ませ、動画を再生して「完了」を押す（またはブラウザを閉じる）と、その間に読み込まれた動画が一覧に出る。ダウンロードには、そのブラウザが実際に送った Cookie と User-Agent を使う。
 
 「動画を探す」で Cloudflare に止められたときは、ブラウザを開くか聞かれる。
 
-このブラウザのプロファイルは `%LOCALAPPDATA%\mvdl\browser` に残るので、確認やログインは次回以降も引き継がれる（普段使っている Edge とは別）。
+ブラウザは Google Chrome を使う（入っていなければ Edge）。このブラウザのプロファイルは `%LOCALAPPDATA%\mvdl\browser-chrome` に残るので、確認やログインは次回以降も引き継がれる（普段使っている Chrome とは別）。
 
 ## 使い方（配布版）
 
@@ -72,9 +72,9 @@ python -m pytest tests    # テスト（ローカルの HTTP サーバーで確�
 | `mvdl/gui.py` | 画面（tkinter） |
 | `mvdl/finder.py` | 動画の検索（yt-dlp、HTML の解析） |
 | `mvdl/probe.py` | 見つけた URL が動画かを確かめ、解像度・長さ・サイズを調べる |
-| `mvdl/browser.py` | Edge を DevTools Protocol で操作し、通信から動画の URL を拾う（Playwright 不要） |
+| `mvdl/browser.py` | Chrome を DevTools Protocol で操作し、通信から動画の URL を拾う（Playwright 不要） |
 | `mvdl/downloader.py` | yt-dlp でのダウンロード、画質の選択、進捗 |
-| `mvdl/tools.py` | exe の隣の ffmpeg / deno、Edge の場所 |
+| `mvdl/tools.py` | exe の隣の ffmpeg / deno、Chrome の場所 |
 
 ## 注意
 

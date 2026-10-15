@@ -34,6 +34,7 @@ jobs:
         run: |
           pip install -r requirements.txt
           python tests/smoke_gui.py
+          python tests/smoke_browser.py
       - run: powershell -ExecutionPolicy Bypass -File build.ps1
       - uses: actions/upload-artifact@v4
         with:
