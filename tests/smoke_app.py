@@ -205,7 +205,7 @@ with open(os.path.join(outdir, 'Slow.mp4'), 'rb') as fh:
     assert fh.read() == SLOW, 'resumed file differs'
 assert any(r.startswith('bytes=') and not r.startswith('bytes=0-') for r in RANGES), RANGES  # resumed, not restarted
 assert result['js_cookie'] and 'sess=abc' in result['js_cookie'], result['js_cookie']
-assert result['view'] == {'tab': 'found', 'found': 1, 'captured': 1, 'queue': 3}, result['view']
+assert result['view'] == {'tab': 'found', 'found': 1, 'captured': 2, 'queue': 3}, result['view']  # both tabs' videos
 print('title while downloading:', result['titles'], '/ at the end:', result['final_title'])
 assert result['final_title'] == '動画ダウンローダー — 完了 3', result['final_title']
 print('app ok')
