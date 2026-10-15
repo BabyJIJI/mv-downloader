@@ -48,6 +48,11 @@ FILES = {  # path -> (content-type, body)
     '/media/audio-only.m3u8': (HLS, AUDIO_MASTER),
     '/media/subs.m3u8': (HLS, SUBS),
     '/media/fake.mp4': ('text/html', b'<html>404 not found</html>'),
+    # media playlists whose segments can't be judged alone: still streams
+    '/media/disguised.m3u8': (HLS, b'#EXTM3U\n#EXTINF:6.0,\nseg0.jpg\n#EXTINF:6.0,\nseg1.jpg\n#EXT-X-ENDLIST\n'),
+    '/media/fmp4.m3u8': (HLS, b'#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:4.0,\nseg0.m4s\n#EXT-X-ENDLIST\n'),
+    '/media/aes.m3u8': (HLS, b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n#EXTINF:4.0,\nseg0.ts\n#EXT-X-ENDLIST\n'),
+    '/media/radio.m3u8': (HLS, b'#EXTM3U\n#EXTINF:10.0,\nseg0.aac\n#EXT-X-ENDLIST\n'),
     '/media/voice.mp4': ('audio/mp4', AUDIO_MP4),
 }
 
@@ -278,3 +283,15 @@ def test_browser_video_kept_when_our_check_is_refused(server, check_mode):
     assert [(c.url, c.source) for c in found] == [(server + '/media/browser-only.mp4', 'ブラウザ（未確認）')]
     dom = f'<video src="{server}/media/browser-only.mp4"></video>'
     assert find_in_page(server + '/page', 'T', dom, [], {}, print) == []
+
+
+def test_hls_media_playlists_judged_by_the_playlist(server, check_mode):
+    """Disguised (.jpg), fMP4 and AES-128 segments can't be read alone: still videos. Audio-only: dropped."""
+    cap = Capture()
+    for name in ('disguised', 'fmp4', 'aes', 'radio'):
+        cap.add(f'{server}/media/{name}.m3u8', 'application/vnd.apple.mpegurl', {})
+    found = find_in_page(server + '/page', 'T', '', cap.candidates(server + '/page', 'T', 'UA'), {}, print)
+    assert sorted(c.url for c in found) == [f'{server}/media/{n}.m3u8' for n in ('aes', 'disguised', 'fmp4')]
+    assert {c.url.rsplit('/', 1)[1]: c.duration for c in found} == {'aes.m3u8': 4.0, 'disguised.m3u8': 12.0,
+                                                                     'fmp4.m3u8': 4.0}
+    assert all(c.source == 'ブラウザ' for c in found)

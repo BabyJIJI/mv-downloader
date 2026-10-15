@@ -22,7 +22,9 @@ VIDEO_CODECS = ('avc1', 'avc3', 'hvc1', 'hev1', 'vp08', 'vp8', 'vp09', 'vp9', 'a
 # ffprobe read the data and it is no media at all (an HTML page, ...); other errors mean we could not get it
 NOT_MEDIA_ERRORS = ('Invalid data found when processing input', 'could not find codec parameters',
                     'Failed to find two consecutive MPEG audio frames')
-NOT_VIDEO_EXT = ('aac', 'mp3', 'm4a', 'opus', 'ogg', 'vtt', 'webvtt', 'srt', 'jpg', 'jpeg', 'png', 'webp', 'gif')
+# HLS segments that make a playlist audio / subtitles only. Not images: video segments are often disguised as
+# .jpg / .png / .gif to slip past filters
+AUDIO_SUB_EXT = ('aac', 'mp3', 'm4a', 'opus', 'ogg', 'vtt', 'webvtt', 'srt')
 
 
 def _get(url, headers, limit, log, rng=False):
@@ -40,12 +42,14 @@ def _get(url, headers, limit, log, rng=False):
             return ctype, r.read(limit), total
 
 
-def _ffprobe(url, headers):
+def _ffprobe(url, headers, hls=False):
     """dict(width, height, duration, size, bit_rate) when the URL has a video stream, else None.
     Raises on probe errors."""
     ffprobe = find_tool('ffprobe')
     h = ''.join(f'{k}: {v}\r\n' for k, v in headers.items() if k.lower() != 'user-agent')
     cmd = [ffprobe, '-v', 'error', '-rw_timeout', '15000000', '-of', 'json', '-show_streams', '-show_format']
+    if hls:  # read the playlist as a whole (init section, keys); accept segments named .jpg / .png / ...
+        cmd += ['-allowed_extensions', 'ALL', '-extension_picky', '0']
     if headers.get('User-Agent'):
         cmd += ['-user_agent', headers['User-Agent']]
     if h:
@@ -115,22 +119,26 @@ def _check_hls(c, log):
             except Exception:  # noqa: BLE001 - size is optional
                 pass
         return info, children
-    # media playlist: look at the first segment
+    # media playlist: a stream unless its segments are plainly audio / subtitles. Segments alone often can't
+    # be read (fMP4 needs its #EXT-X-MAP init, AES-128 needs the key, disguised headers), so they are not
+    # judged by their content; ffprobe reads the whole playlist for the resolution, best effort.
     seg = next((ln for ln in lines if not ln.startswith('#')), None)
     if not seg:
         return None, set()
     ext = urllib.parse.urlparse(seg).path.rsplit('.', 1)[-1].lower()
-    if ext in NOT_VIDEO_EXT:
+    if ext in AUDIO_SUB_EXT:
         return None, set()
-    duration = _hls_duration(text)
+    info = {'duration': _hls_duration(text)}
     if find_tool('ffprobe'):
-        info = _ffprobe(urllib.parse.urljoin(c.url, seg), c.headers)
-        if info is None:
-            return None, set()
-        size = info['bit_rate'] * duration / 8 if info.get('bit_rate') and duration else None
-        return {'width': info['width'], 'height': info['height'], 'duration': duration, 'size': size and int(size),
-                'size_approx': True}, set()
-    return {'duration': duration}, set()
+        try:
+            p = _ffprobe(c.url, c.headers, hls=True)
+        except Exception:  # noqa: BLE001 - resolution unknown, still a stream
+            p = None
+        if p:
+            info |= {'width': p['width'], 'height': p['height']}
+            if p.get('bit_rate') and info['duration']:
+                info |= {'size': int(p['bit_rate'] * info['duration'] / 8), 'size_approx': True}
+    return info, set()
 
 
 def _hls_duration(text):
