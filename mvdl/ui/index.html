@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>動画ダウンローダー</title>
+<style>
+:root {
+  --bg: #f3f3f3; --panel: #ffffff; --panel-2: #fafafa; --line: #e5e5e5; --line-strong: #d1d1d1;
+  --text: #1b1b1b; --muted: #616161; --faint: #8a8a8a;
+  --accent: #0f6cbd; --accent-hover: #115ea3; --accent-soft: #e8f1fb; --accent-text: #ffffff;
+  --ok: #107c10; --ok-soft: #e7f4e7; --warn: #8a5300; --warn-soft: #fff4ce; --bad: #c42b1c; --bad-soft: #fde7e9;
+  --row-hover: #f5f5f5; --row-sel: #e8f1fb;
+  --shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.04);
+  --radius: 8px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1f1f1f; --panel: #2b2b2b; --panel-2: #262626; --line: #3a3a3a; --line-strong: #4a4a4a;
+    --text: #f2f2f2; --muted: #b5b5b5; --faint: #8f8f8f;
+    --accent: #4cc2ff; --accent-hover: #6ccdff; --accent-soft: #1f3a4d; --accent-text: #00243a;
+    --ok: #6ccb5f; --ok-soft: #22361f; --warn: #fce100; --warn-soft: #3d3712; --bad: #ff99a4; --bad-soft: #442726;
+    --row-hover: #333333; --row-sel: #1f3a4d;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 2px 8px rgba(0,0,0,.25);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--text); overflow: hidden;
+  font: 13px/1.5 "Segoe UI Variable Text", "Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif;
+  display: grid; grid-template-columns: 340px 1fr; user-select: none;
+}
+button, input, select { font: inherit; color: inherit; }
+
+/* ---- console */
+aside {
+  display: flex; flex-direction: column; gap: 12px; padding: 16px 14px 16px 16px; overflow-y: auto;
+  border-right: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 10px; padding: 2px 2px 6px; }
+.brand svg { width: 26px; height: 26px; color: var(--accent); flex: none; }
+.brand b { font-size: 15px; font-weight: 600; }
+.brand small { color: var(--faint); margin-left: auto; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+        padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.card h2 { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .02em; }
+label.field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+input[type=text], select {
+  height: 32px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--panel-2);
+  outline: none; min-width: 0; user-select: text;
+}
+input[type=text]:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > .grow { flex: 1; }
+.btn {
+  height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--panel);
+  cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}
+.btn:hover { background: var(--row-hover); }
+.btn:active { transform: translateY(.5px); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.block { width: 100%; }
+.btn.icon { width: 32px; padding: 0; }
+.btn svg { width: 16px; height: 16px; }
+.hint { color: var(--muted); font-size: 12px; min-height: 18px; }
+.hint.warn { color: var(--warn); }
+.link { color: var(--accent); cursor: pointer; text-decoration: none; }
+.link:hover { text-decoration: underline; }
+.progress { height: 3px; border-radius: 3px; background: var(--line); overflow: hidden; visibility: hidden; }
+.progress.on { visibility: visible; }
+.progress > i { display: block; height: 100%; width: 30%; background: var(--accent); border-radius: 3px;
+                animation: slide 1.1s ease-in-out infinite; }
+@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.stats { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { padding: 1px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.chip b { color: var(--text); font-weight: 600; }
+
+/* ---- tabs */
+main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+nav.tabs { display: flex; gap: 4px; padding: 10px 16px 0; border-bottom: 1px solid var(--line); }
+nav.tabs button {
+  border: 0; background: none; padding: 8px 12px 10px; cursor: pointer; color: var(--muted); position: relative;
+  display: inline-flex; gap: 6px; align-items: center; border-radius: 6px 6px 0 0;
+}
+nav.tabs button:hover { color: var(--text); background: var(--row-hover); }
+nav.tabs button.on { color: var(--text); font-weight: 600; }
+nav.tabs button.on::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: -1px; height: 3px;
+                            border-radius: 3px; background: var(--accent); }
+.count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--line); color: var(--muted);
+         font-size: 11px; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; }
+nav.tabs button.on .count { background: var(--accent-soft); color: var(--accent); }
+section.view { display: none; flex: 1; min-height: 0; flex-direction: column; padding: 12px 16px 16px; gap: 10px; }
+section.view.on { display: flex; }
+.toolbar { display: flex; gap: 8px; align-items: center; }
+.toolbar .note { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+/* ---- tables */
+.table-wrap { flex: 1; min-height: 0; overflow: auto; background: var(--panel); border: 1px solid var(--line);
+              border-radius: var(--radius); box-shadow: var(--shadow); }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th { position: sticky; top: 0; z-index: 1; background: var(--panel); text-align: left; font-weight: 600; color: var(--muted);
+     font-size: 12px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+td { padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+     vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+tbody tr { cursor: default; }
+tbody tr:hover { background: var(--row-hover); }
+tbody tr.sel { background: var(--row-sel); }
+td.check, th.check { width: 36px; text-align: center; padding: 0; }
+input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); margin: 0; vertical-align: middle; }
+.title { font-weight: 500; }
+.sub { color: var(--faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }
+.num { font-variant-numeric: tabular-nums; }
+.badge { display: inline-block; padding: 0 7px; border-radius: 4px; font-size: 11.5px; font-weight: 600; line-height: 19px;
+         background: var(--accent-soft); color: var(--accent); }
+.badge.gray { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); line-height: 17px; }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.state { display: flex; flex-direction: column; gap: 4px; }
+.state .bar { height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.state .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+.state.done .bar > i { background: var(--ok); }
+.state.failed .label { color: var(--bad); }
+.state.done .label { color: var(--ok); }
+.state .label { font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--faint);
+         padding: 48px 16px; text-align: center; }
+.empty svg { width: 40px; height: 40px; opacity: .6; }
+
+/* ---- browser */
+.address { display: flex; gap: 6px; align-items: center; }
+.address input { flex: 1; }
+#browser-slot { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+                display: flex; align-items: center; justify-content: center; color: var(--faint); overflow: hidden; }
+
+/* ---- log */
+#log { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line);
+       border-radius: var(--radius); font: 12px/1.6 "Cascadia Mono", Consolas, "BIZ UDGothic", monospace; white-space: pre-wrap;
+       word-break: break-all; user-select: text; }
+
+/* ---- dialog */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 10; }
+.scrim.on { display: flex; }
+.dialog { width: 440px; background: var(--panel); border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,.3); padding: 20px;
+          display: flex; flex-direction: column; gap: 12px; }
+.dialog h3 { margin: 0; font-size: 16px; }
+.dialog p { margin: 0; color: var(--muted); }
+.dialog .row { justify-content: flex-end; }
+.toast { position: fixed; right: 16px; bottom: 16px; background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 6px;
+         box-shadow: var(--shadow); opacity: 0; transform: translateY(8px); transition: .2s; pointer-events: none; z-index: 11; }
+.toast.on { opacity: 1; transform: none; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>
+    <b>動画ダウンローダー</b><small id="version"></small>
+  </div>
+
+  <div class="card">
+    <h2>動画を探す</h2>
+    <label class="field">ページの URL
+      <input type="text" id="url" placeholder="https://" spellcheck="false">
+    </label>
+    <div class="row">
+      <button class="btn primary grow" id="find-url">URL から探す</button>
+      <button class="btn grow" id="open-browser">ブラウザで開く</button>
+    </div>
+    <button class="btn block" id="find-page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/></svg>
+      ブラウザのページから探す</button>
+    <div class="progress" id="busy"><i></i></div>
+    <div class="hint" id="status">URL を入れて「URL から探す」を押してください</div>
+    <div class="hint">ブラウザのページで読み込んだ動画: <a class="link" id="captured-link"><b id="captured-count">0</b> 件</a></div>
+  </div>
+
+  <div class="card">
+    <h2>ダウンロード</h2>
+    <label class="field">保存先
+      <div class="row"><input type="text" id="outdir" class="grow" spellcheck="false"><button class="btn" id="browse">参照…</button></div>
+    </label>
+    <div class="row">
+      <label class="field grow">画質<select id="quality"></select></label>
+      <label class="field" style="width:96px">同時に<select id="parallel"></select></label>
+    </div>
+    <button class="btn primary block" id="enqueue">選んだ動画をダウンロードに追加</button>
+    <div class="hint warn" id="ffmpeg-note" hidden>ffmpeg がないため、高画質の動画は保存できないことがあります</div>
+  </div>
+
+  <div class="card">
+    <h2>ダウンロード一覧</h2>
+    <div class="stats" id="queue-stats"><span class="chip">まだありません</span></div>
+    <div class="row">
+      <button class="btn grow" id="cancel">中止</button>
+      <button class="btn grow" id="retry">再試行</button>
+      <button class="btn grow" id="clear">完了を消す</button>
+    </div>
+    <button class="btn block" id="open-folder">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      保存先を開く</button>
+  </div>
+</aside>
+
+<main>
+  <nav class="tabs" id="tabs">
+    <button data-tab="found" class="on">見つかった動画 <span class="count" id="n-found">0</span></button>
+    <button data-tab="browser">ブラウザ</button>
+    <button data-tab="captured">ブラウザで読み込んだ動画 <span class="count" id="n-captured">0</span></button>
+    <button data-tab="queue">ダウンロード一覧 <span class="count" id="n-queue">0</span></button>
+    <button data-tab="log">ログ</button>
+  </nav>
+
+  <section class="view on" data-view="found">
+    <div class="table-wrap"><table id="found">
+      <colgroup><col style="width:36px"><col><col style="width:84px"><col style="width:110px"><col style="width:70px"><col style="width:96px"><col style="width:130px"></colgroup>
+      <thead><tr><th class="check"><input type="checkbox" data-all></th><th>動画</th><th>種類</th><th>解像度</th><th>長さ</th><th>サイズ</th><th>見つけ方</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+
+  <section class="view" data-view="browser">
+    <div class="address">
+      <button class="btn icon" id="back" title="戻る"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+      <button class="btn icon" id="forward" title="進む"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+      <button class="btn icon" id="reload" title="再読み込み"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
+      <input type="text" id="address" spellcheck="false" placeholder="URL を入力して Enter">
+      <button class="btn primary" id="find-page-2">このページから探す</button>
+    </div>
+    <div id="browser-slot">ブラウザを準備しています…</div>
+  </section>
+
+  <section class="view" data-view="captured">
+    <div class="toolbar"><span class="note">ブラウザが動画として受け取った通信です（中身の確認はしていません）。選んで「ダウンロードに追加」できます。</span></div>
+    <div class="table-wrap"><table id="captured">
+      <colgroup><col style="width:36px"><col style="width:84px"><col style="width:84px"><col style="width:190px"><col></colgroup>
+      <thead><tr><th class="check"><input type="checkbox" data-all></th><th>時刻</th><th>種類</th><th>Content-Type</th><th>URL</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+
+  <section class="view" data-view="queue">
+    <div class="table-wrap"><table id="queue">
+      <colgroup><col style="width:36px"><col><col style="width:100px"><col style="width:96px"><col style="width:300px"></colgroup>
+      <thead><tr><th class="check"><input type="checkbox" data-all></th><th>タイトル</th><th>画質</th><th>サイズ</th><th>状態</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+
+  <section class="view" data-view="log"><pre id="log"></pre></section>
+</main>
+
+<div class="scrim" id="dialog"><div class="dialog">
+  <h3 id="dialog-title"></h3><p id="dialog-text"></p>
+  <div class="row"><button class="btn" id="dialog-no">いいえ</button><button class="btn primary" id="dialog-yes">はい</button></div>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+const $ = (s, el = document) => el.querySelector(s);
+const send = (cmd, args = {}) => window.chrome?.webview?.postMessage({cmd, ...args});
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const EMPTY = {
+  found: ['動画はまだ見つかっていません', '「URL から探す」か、ブラウザで再生してから「ブラウザのページから探す」を押してください'],
+  captured: ['まだありません', 'ブラウザでページを開いて動画を再生すると、ここに出ます'],
+  queue: ['ダウンロードはまだありません', '動画を選んで「ダウンロードに追加」を押してください'],
+};
+const ICON_EMPTY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5z"/></svg>';
+
+// ---- tables with checkbox selection
+const tables = {};
+function makeTable(name, cols, onOpen) {
+  const t = {name, rows: new Map(), sel: new Set(), el: $(`#${name}`), cols, onOpen};
+  const body = $('tbody', t.el);
+  t.el.addEventListener('click', e => {
+    const all = e.target.closest('[data-all]');
+    if (all) { t.rows.forEach((_, id) => all.checked ? t.sel.add(id) : t.sel.delete(id)); paint(t); return; }
+    const tr = e.target.closest('tbody tr[data-id]');
+    if (!tr) return;
+    const id = tr.dataset.id;
+    if (e.target.matches('input[type=checkbox]') || e.ctrlKey) t.sel.has(id) ? t.sel.delete(id) : t.sel.add(id);
+    else { t.sel.clear(); t.sel.add(id); }
+    paint(t);
+  });
+  t.el.addEventListener('dblclick', e => { const tr = e.target.closest('tbody tr[data-id]'); if (tr && onOpen) onOpen(tr.dataset.id); });
+  t.render = () => {
+    if (!t.rows.size) {
+      const [a, b] = EMPTY[name];
+      body.innerHTML = `<tr><td colspan="${cols + 1}"><div class="empty">${ICON_EMPTY}<b>${a}</b><span>${b}</span></div></td></tr>`;
+    } else {
+      body.innerHTML = [...t.rows.entries()].map(([id, html]) =>
+        `<tr data-id="${esc(id)}"><td class="check"><input type="checkbox"></td>${html}</tr>`).join('');
+    }
+    paint(t);
+    $(`#n-${name}`).textContent = t.rows.size;
+  };
+  t.set = (id, html) => {
+    const had = t.rows.has(id);
+    t.rows.set(id, html);
+    const tr = had && body.querySelector(`tr[data-id="${CSS.escape(id)}"]`);
+    if (tr) { tr.innerHTML = `<td class="check"><input type="checkbox"></td>${html}`; paint(t); }
+    else t.render();
+  };
+  t.remove = id => { t.rows.delete(id); t.sel.delete(id); };
+  t.clear = () => { t.rows.clear(); t.sel.clear(); t.render(); };
+  t.selected = () => [...t.sel].filter(id => t.rows.has(id));
+  tables[name] = t;
+  t.render();
+  return t;
+}
+function paint(t) {
+  t.el.querySelectorAll('tbody tr[data-id]').forEach(tr => {
+    const on = t.sel.has(tr.dataset.id);
+    tr.classList.toggle('sel', on);
+    $('input', tr).checked = on;
+  });
+  const all = $('[data-all]', t.el);
+  all.checked = t.rows.size > 0 && t.sel.size === t.rows.size;
+}
+
+const found = makeTable('found', 6, () => enqueue('found'));
+const captured = makeTable('captured', 4, () => enqueue('captured'));
+const queue = makeTable('queue', 4, id => send('openFolder', {id}));
+
+const SOURCE = s => s.includes('未確認') ? `<span class="badge warn">${esc(s)}</span>` : `<span class="badge gray">${esc(s)}</span>`;
+function foundRow(v) {
+  const sub = v.source === 'yt-dlp' ? '' : `<div class="sub">${esc(v.url)}</div>`;
+  return `<td title="${esc(v.title)}\n${esc(v.url)}"><div class="title">${esc(v.title)}</div>${sub}</td>
+    <td><span class="badge">${esc(v.kind)}</span></td><td class="num">${esc(v.resolution)}</td><td class="num">${esc(v.duration)}</td>
+    <td class="num">${esc(v.size)}</td><td>${SOURCE(v.source)}</td>`;
+}
+function capturedRow(v) {
+  return `<td class="num">${esc(v.time)}</td><td><span class="badge">${esc(v.kind)}</span></td><td>${esc(v.mime)}</td>
+    <td title="${esc(v.url)}">${esc(v.url)}</td>`;
+}
+const STATE_CLASS = {'完了': 'done', '失敗': 'failed', '中止': 'failed'};
+function jobRow(v) {
+  const pct = v.progress == null ? (v.state === '完了' ? 100 : 0) : Math.round(v.progress * 100);
+  return `<td title="${esc(v.title)}"><div class="title">${esc(v.title)}</div></td><td>${esc(v.quality)}</td><td class="num">${esc(v.size)}</td>
+    <td><div class="state ${STATE_CLASS[v.state] || ''}"><div class="label" title="${esc(v.text || v.state)}">${esc(v.text || v.state)}</div>
+    <div class="bar"><i style="width:${pct}%"></i></div></div></td>`;
+}
+
+// ---- tabs (the browser is a real window laid over #browser-slot)
+let tab = 'found';
+function showTab(name) {
+  tab = name;
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('section.view').forEach(s => s.classList.toggle('on', s.dataset.view === name));
+  send('tab', {name});
+  reportSlot();
+}
+$('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) showTab(b.dataset.tab); });
+function reportSlot() {
+  const r = $('#browser-slot').getBoundingClientRect(), k = window.devicePixelRatio;
+  send('slot', {visible: tab === 'browser', x: Math.round(r.left * k), y: Math.round(r.top * k),
+                w: Math.round(r.width * k), h: Math.round(r.height * k)});
+}
+new ResizeObserver(reportSlot).observe($('#browser-slot'));
+window.addEventListener('resize', reportSlot);
+
+// ---- console
+const url = $('#url');
+const findUrl = () => send('findUrl', {url: url.value});
+$('#find-url').onclick = findUrl;
+url.addEventListener('keydown', e => { if (e.key === 'Enter') findUrl(); });
+$('#open-browser').onclick = () => send('openInBrowser', {url: url.value});
+$('#find-page').onclick = $('#find-page-2').onclick = () => send('findPage');
+$('#captured-link').onclick = () => showTab('captured');
+function enqueue(from) {
+  const t = from === 'captured' ? captured : found;
+  const ids = t.selected();
+  if (!ids.length) { toast(from === 'captured' ? '一覧から動画を選んでください' : '「見つかった動画」から動画を選んでください'); showTab(from); return; }
+  send('enqueue', {from, ids});
+}
+$('#enqueue').onclick = () => enqueue(tab === 'captured' ? 'captured' : 'found');
+$('#cancel').onclick = () => send('cancel', {ids: queue.selected()});
+$('#retry').onclick = () => send('retry', {ids: queue.selected()});
+$('#clear').onclick = () => send('clear');
+$('#open-folder').onclick = () => send('openFolder', {id: queue.selected()[0] || null});
+$('#browse').onclick = () => send('browse');
+for (const key of ['outdir', 'quality', 'parallel']) $('#' + key).addEventListener('change', e => send('set', {key, value: e.target.value}));
+const address = $('#address');
+address.addEventListener('keydown', e => { if (e.key === 'Enter') send('navigate', {url: address.value}); });
+$('#back').onclick = () => send('back');
+$('#forward').onclick = () => send('forward');
+$('#reload').onclick = () => send('reload');
+
+let toastTimer;
+function toast(text) {
+  const t = $('#toast'); t.textContent = text; t.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('on'), 2600);
+}
+function ask(title, text, yes) {
+  $('#dialog-title').textContent = title; $('#dialog-text').textContent = text;
+  const d = $('#dialog'); d.classList.add('on'); send('slot', {visible: false});
+  const close = ok => { d.classList.remove('on'); reportSlot(); if (ok) yes(); };
+  $('#dialog-yes').onclick = () => close(true); $('#dialog-no').onclick = () => close(false);
+}
+function options(sel, values, value) {
+  sel.innerHTML = values.map(v => `<option${v === value ? ' selected' : ''}>${esc(v)}</option>`).join('');
+}
+
+// ---- messages from the app
+const handlers = {
+  init(m) {
+    $('#version').textContent = 'v' + m.version;
+    options($('#quality'), m.qualities, m.settings.quality);
+    options($('#parallel'), m.parallel, String(m.settings.parallel));
+    $('#outdir').value = m.settings.outdir;
+    url.value = m.url || '';
+    $('#ffmpeg-note').hidden = m.ffmpeg;
+  },
+  busy(m) {
+    $('#busy').classList.toggle('on', m.on);
+    for (const id of ['#find-url', '#find-page', '#find-page-2']) $(id).disabled = m.on;
+    if (m.text) $('#status').textContent = m.text;
+  },
+  status(m) { $('#status').textContent = m.text; },
+  toast(m) { toast(m.text); },
+  url(m) { url.value = m.url; },
+  outdir(m) { $('#outdir').value = m.value; },
+  tab(m) { showTab(m.name); },
+  found(m) {
+    found.rows.clear(); found.sel.clear();
+    for (const v of m.items) found.rows.set(v.id, foundRow(v));
+    if (m.items.length) found.sel.add(m.items[0].id);
+    found.render();
+  },
+  capturedReset() { captured.clear(); $('#captured-count').textContent = 0; },
+  captured(m) { captured.set(m.item.id, capturedRow(m.item)); $('#captured-count').textContent = captured.rows.size; },
+  browser(m) { if (document.activeElement !== address) address.value = m.url; },
+  job(m) { queue.set(m.item.id, jobRow(m.item)); },
+  jobsRemoved(m) { m.ids.forEach(id => queue.remove(id)); queue.render(); },
+  queueStats(m) {
+    $('#queue-stats').innerHTML = m.parts.length
+      ? m.parts.map(([k, n]) => `<span class="chip">${esc(k)} <b>${n}</b></span>`).join('')
+      : '<span class="chip">まだありません</span>';
+  },
+  log(m) { const l = $('#log'); const end = l.scrollTop + l.clientHeight >= l.scrollHeight - 4;
+           l.append(m.text + '\n'); if (end) l.scrollTop = l.scrollHeight; },
+  blocked(m) {
+    ask('Cloudflare の確認画面で止められました',
+        'ブラウザのタブで開きます。確認を通って動画を再生したら「ブラウザのページから探す」を押してください。',
+        () => send('openInBrowser', {url: m.url}));
+  },
+  browserFailed(m) { $('#browser-slot').textContent = m.text; },
+};
+window.chrome?.webview?.addEventListener('message', e => handlers[e.data.type]?.(e.data));
+// for tests: what the page shows
+window.mvdlView = () => ({tab, found: found.rows.size, captured: captured.rows.size, queue: queue.rows.size});
+send('ready');
+</script>
+</body>
+</html>
