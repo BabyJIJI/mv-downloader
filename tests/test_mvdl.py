@@ -66,6 +66,9 @@ PAGES = {
                    b'<script>var a = ["/media/fake.mp4", "http://HOST/media/master.m3u8", "http://HOST/media/v720.m3u8",'
                    b' "http://HOST/media/audio-only.m3u8", "http://HOST/media/subs.m3u8", "http://HOST/media/voice.mp4"];'
                    b'</script></body></html>',
+    # yt-dlp's generic extractor turns each <video> / <audio> into an entry pointing back at the page
+    '/av.html': b'<html><head><title>AV</title></head><body>'
+                b'<video src="/media/clip.mp4"></video><audio src="/media/voice.mp4"></audio></body></html>',
     '/empty.html': b'<html><head><title>Nothing</title></head><body><p>no video</p></body></html>',
 }
 
@@ -196,9 +199,16 @@ def test_nothing_found(server):
     assert find_videos(server + '/empty.html', print, use_browser=False) == []
 
 
-def test_ytdlp_generic_finds_video_tag(server):
+def test_ytdlp_generic_finds_video_tag(server, check_mode):
     found = find_with_ytdlp(server + '/video-tag.html', print)
-    assert len(found) == 1 and found[0].source == 'yt-dlp'
+    assert [(c.url, c.kind) for c in found] == [(server + '/media/clip.mp4', 'mp4')]
+
+
+def test_ytdlp_generic_lists_media_not_page(server, check_mode):
+    """Each entry becomes its media URL (not the page), and the audio one is dropped."""
+    found = find_with_ytdlp(server + '/av.html', print)
+    assert [c.url for c in found] == [server + '/media/clip.mp4']
+    assert found[0].size == len(VIDEO)
 
 
 def test_download_direct(server, tmp_path):
@@ -226,3 +236,34 @@ def test_download_sends_browser_headers(server, tmp_path):
     assert got.get('User-Agent') == 'Mozilla/5.0 test-ua'
     assert got.get('Referer') == server + '/page'
     assert 'cf_clearance=abc' in got.get('Cookie', '')
+
+
+def test_visible_browser_falls_back_when_profile_busy(monkeypatch, tmp_path):
+    """Profile still used by a leftover browser: end it and retry, then fall back to a temporary profile."""
+    import mvdl.browser as b
+    monkeypatch.setattr(b, 'profile_dir', lambda: str(tmp_path / 'keep'))
+    killed, tried = [], []
+    monkeypatch.setattr(b, '_kill_profile_browsers', killed.append)
+
+    def launch(exe, profile, visible):
+        tried.append(profile)
+        if len(tried) < 3:
+            raise b.LaunchError('busy', b.EXIT_HANDED_OFF)
+        return 'proc', 1234
+
+    monkeypatch.setattr(b, '_launch', launch)
+    proc, port, profile, temp = b._start('edge', True, print)
+    assert killed == [str(tmp_path / 'keep')]
+    assert tried[:2] == [str(tmp_path / 'keep')] * 2 and tried[2] == profile != tried[0]
+    assert (proc, port, temp) == ('proc', 1234, True)
+    os.rmdir(profile)
+
+
+def test_headless_browser_uses_fresh_profile(monkeypatch):
+    import mvdl.browser as b
+    monkeypatch.setattr(b, '_launch', lambda exe, profile, visible: ('proc', 1))
+    _, _, p1, t1 = b._start('edge', False, print)
+    _, _, p2, t2 = b._start('edge', False, print)
+    assert p1 != p2 and t1 and t2
+    os.rmdir(p1)
+    os.rmdir(p2)

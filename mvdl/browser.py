@@ -11,7 +11,9 @@ Playwright / browser download is needed.
 """
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -128,9 +130,18 @@ def profile_dir():
     return os.path.join(base, 'mvdl', 'browser')
 
 
+class LaunchError(RuntimeError):
+    def __init__(self, msg, code=None):
+        super().__init__(msg)
+        self.code = code
+
+
+EXIT_HANDED_OFF = 21  # Chromium: another browser already uses this profile and took the request
+
+
 def _launch(exe, profile, visible):
     args = [exe, '--remote-debugging-port=0', f'--user-data-dir={profile}',
-            '--no-first-run', '--no-default-browser-check', '--disable-extensions',
+            '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--enable-logging=stderr',
             '--autoplay-policy=no-user-gesture-required', '--window-size=1280,800', 'about:blank']
     if not visible:
         args[1:1] = ['--headless=new', '--mute-audio']
@@ -140,17 +151,62 @@ def _launch(exe, profile, visible):
     except OSError:
         pass
     flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
-    for _ in range(150):
+    err = tempfile.TemporaryFile()
+    proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+                            creationflags=flags)
+    for _ in range(200):
         if proc.poll() is not None:
-            raise RuntimeError('ブラウザが起動しませんでした（前回のブラウザの画面が開いたままなら閉じてください）')
+            err.seek(0)
+            tail = err.read().decode('utf-8', 'replace').strip().splitlines()[-5:]
+            raise LaunchError(f'ブラウザが起動しませんでした（終了コード {proc.returncode}）'
+                              + ('\n  ' + '\n  '.join(tail) if tail else ''), proc.returncode)
         if os.path.isfile(port_file):
             lines = open(port_file).read().split()
             if lines:
                 return proc, int(lines[0])
         time.sleep(0.1)
     proc.kill()
-    raise RuntimeError('ブラウザに接続できませんでした')
+    raise LaunchError('ブラウザに接続できませんでした（20 秒待っても応答がありません）')
+
+
+def _kill_profile_browsers(profile):
+    """End the Edge processes left running on our own profile (a window from an earlier run, or one that
+    did not shut down). Only processes whose command line names this profile are touched."""
+    if os.name != 'nt':
+        return
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' or Name='chrome.exe'\" | "
+          "Where-Object { $_.CommandLine -like ('*' + $env:MVDL_PROFILE + '*') } | "
+          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+    subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps], timeout=30,
+                   env=os.environ | {'MVDL_PROFILE': profile}, creationflags=subprocess.CREATE_NO_WINDOW,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1)
+
+
+def _start(exe, visible, log):
+    """(process, port, profile dir, whether to delete the profile afterwards).
+
+    Headless runs get a fresh profile each time, so a leftover one can never block anything. The visible
+    browser keeps its profile (passed checks, logins); if that profile is still in use, the old browser
+    is ended and, failing that, a temporary profile is used."""
+    if not visible:
+        profile = tempfile.mkdtemp(prefix='mvdl-')
+        return (*_launch(exe, profile, visible), profile, True)
+    profile = profile_dir()
+    os.makedirs(profile, exist_ok=True)
+    try:
+        return (*_launch(exe, profile, visible), profile, False)
+    except LaunchError as e:
+        log(f'{e}')
+    log('前回のブラウザが残っている可能性があるため、終了させてから開き直します')
+    try:
+        _kill_profile_browsers(profile)
+        return (*_launch(exe, profile, visible), profile, False)
+    except (LaunchError, OSError, subprocess.SubprocessError) as e:
+        log(f'{e}')
+    log('一時的なプロファイルで開きます（確認やログインは次回に引き継がれません）')
+    profile = tempfile.mkdtemp(prefix='mvdl-')
+    return (*_launch(exe, profile, visible), profile, True)
 
 
 class _Watch:
@@ -269,13 +325,12 @@ def sniff(url, log, wait=25, settle=4, stop=None, visible=False):
     if not exe:
         log('Edge / Chrome が見つからないため、ブラウザでの検索はできません')
         return []
-    profile = profile_dir()
-    os.makedirs(profile, exist_ok=True)
     if visible:
         wait = 30 * 60
     proc = cdp = None
+    profile, temp_profile = None, False
     try:
-        proc, port = _launch(exe, profile, visible)
+        proc, port, profile, temp_profile = _start(exe, visible, log)
         version = json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/json/version', timeout=10))
         cdp = CDP(version['webSocketDebuggerUrl'])
         ua = cdp.call('Browser.getVersion')['userAgent'].replace('HeadlessChrome', 'Chrome')
@@ -344,6 +399,8 @@ def sniff(url, log, wait=25, settle=4, stop=None, visible=False):
                 proc.wait(5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        if temp_profile:
+            shutil.rmtree(profile, ignore_errors=True)
 
 
 def _eval(cdp, session, expr):

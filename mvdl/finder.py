@@ -17,6 +17,7 @@ from yt_dlp.networking import Request
 from .tools import ydl_base_opts
 
 MEDIA_EXT = ('mp4', 'm4v', 'mov', 'webm', 'mkv', 'm3u8', 'mpd', 'flv')
+VIDEO_EXT = ('mp4', 'm4v', 'mov', 'webm', 'mkv', 'flv', 'ts', '3gp', 'avi', 'wmv')
 MEDIA_URL_RE = re.compile(
     r'''(?:https?:)?//[^\s"'<>()\\]+?\.(?:%s)(?:\?[^\s"'<>()\\]*)?(?=["'\s<>()\\]|$)''' % '|'.join(MEDIA_EXT),
     re.I)
@@ -117,7 +118,7 @@ class Blocked(Exception):
 
 def find_with_ytdlp(url, log, headers=None):
     opts = ydl_base_opts(Logger(log)) | {'skip_download': True, 'extract_flat': 'in_playlist',
-                                         'playlistend': 500}
+                                         'playlistend': 500, 'ignoreerrors': 'only_download'}
     if headers:
         opts['http_headers'] = headers
     try:
@@ -130,19 +131,20 @@ def find_with_ytdlp(url, log, headers=None):
         return []
     if not info:
         return []
+    if not has_site_extractor(url) and not has_site_extractor(info.get('webpage_url') or url):
+        # found by yt-dlp's generic machinery (Generic, HTML5MediaEmbed, ...) on an ordinary page,
+        # not by a site's own extractor: the result points back at the page itself
+        return _from_generic(info, url, log, headers)
     site = info.get('extractor_key') or 'yt-dlp'
-    if site == 'Generic':
-        site = kind_of(info.get('url') or url) if info.get('url') else 'ページ'
     entries = info.get('entries')
     if entries is None:
-        formats = info.get('formats') or [info]
-        if all(f.get('vcodec') == 'none' for f in formats):
-            log(f'音声だけなので除きました: {info.get("title") or url}')
+        if not _has_video(info):
+            log(f'動画ではないので除きました: {info.get("title") or url}')
             return []
         size, approx = ytdlp_size(info)
         return [Candidate(info.get('webpage_url') or url, info.get('title') or url, site, 'yt-dlp', headers or {},
                           fmt_resolution(info), info.get('duration'), size, approx)]
-    out = []
+    out = []  # a playlist / channel of a supported site: its entries are that site's videos
     for e in entries:
         if not e:
             continue
@@ -152,6 +154,41 @@ def find_with_ytdlp(url, log, headers=None):
         out.append(Candidate(u, e.get('title') or u, e.get('ie_key') or site, 'yt-dlp', headers or {},
                              fmt_resolution(e), e.get('duration')))
     return out
+
+
+def _has_video(info):
+    formats = info.get('formats') or [info]
+    return any(f.get('vcodec') != 'none' and (f.get('vcodec') or f.get('height') or f.get('width')
+                                               or f.get('ext') in VIDEO_EXT or 'm3u8' in (f.get('protocol') or ''))
+               for f in formats)
+
+
+def _from_generic(info, url, log, headers):
+    """yt-dlp's generic extractors found media on an arbitrary page (<video>, <audio>, JSON-LD, ...). Its
+    entries all point back at the page, so take each one's media URL and check it like the ones from
+    our own HTML scan: audio and anything that is not a video is dropped."""
+    entries = info['entries'] if 'entries' in info else [info]
+    referer = {'Referer': info.get('webpage_url') or url}
+    out, direct = [], []
+    for e in list(entries or [])[:50]:
+        if not e:
+            continue
+        if e.get('_type') in ('url', 'url_transparent'):  # an embed (YouTube, Vimeo, ...)
+            if has_site_extractor(e.get('url') or ''):
+                out += find_with_ytdlp(e['url'], log, referer)
+            continue
+        formats = e.get('formats') or [e]
+        f = next((f for f in reversed(formats) if f.get('vcodec') != 'none'), formats[-1])
+        media = f.get('manifest_url') or f.get('url')
+        if not media or not media.startswith('http'):
+            continue
+        h = referer | {k: v for k, v in (f.get('http_headers') or {}).items() if k in ('User-Agent', 'Cookie')}
+        kind = 'HLS' if 'm3u8' in (f.get('protocol') or '') else kind_of(media)
+        direct.append(Candidate(media, e.get('title') or info.get('title') or url, kind, 'ページ内', h))
+    from .probe import keep_videos
+    seen = set()
+    direct = [c for c in direct if not (c.url in seen or seen.add(c.url))]
+    return out + keep_videos(direct, log)
 
 
 def _short(e):
