@@ -109,6 +109,8 @@ def drive(app):
     job = lambda title: next((j for j in app.jobs.values() if j.cand.title == title), None)  # noqa: E731
     states = lambda: [j.state for j in app.jobs.values()]  # noqa: E731
     view = {}
+    tabs = {}
+    titles = []
 
     shots = {}
 
@@ -134,15 +136,23 @@ def drive(app):
          lambda: states() == [appmod.DONE]),
         ('ブラウザで開く', lambda: app.handle({'cmd': 'openInBrowser', 'url': base + '/js.html'}),
          lambda: len(app.capture) >= 1 and app.web.Visible and app.web.Width > 100
-         and getattr(app.checked.get(base + '/media/js.mp4'), 'size', None) == len(VIDEO)),
+         and getattr(app.checked.get((app.active, base + '/media/js.mp4')), 'size', None) == len(VIDEO)),
         ('「ブラウザで読み込んだ動画」から追加',
-         lambda: app.handle({'cmd': 'enqueue', 'from': 'captured', 'ids': [base + '/media/js.mp4']}),
+         lambda: app.handle({'cmd': 'enqueue', 'from': 'captured', 'ids': [f'{app.active}|{base}/media/js.mp4']}),
          lambda: states() == [appmod.DONE, appmod.DONE]),
+        ('タブを増やす', lambda: tabs.update(js=app.active) or app.handle({'cmd': 'newTab', 'url': base + '/video.html'}),
+         lambda: len(app.browsers) == 3 and app.active != tabs['js'] and app.core is not None
+         and app.core.DocumentTitle == 'Video page' and app.web.Visible
+         and not app.browsers[tabs['js']].web.Visible),
+        ('タブを閉じる', lambda: app.handle({'cmd': 'closeTab', 'id': app.active})
+         or app.handle({'cmd': 'switchTab', 'id': tabs['js']}),
+         lambda: len(app.browsers) == 2 and app.active == tabs['js'] and app.web.Visible),
         ('ブラウザのページから探す', lambda: app.handle({'cmd': 'findPage'}),
          lambda: not app.searching and found() == [base + '/media/js.mp4']),
         ('一時停止', lambda: app.add_jobs([appmod.Candidate(base + '/media/slow.mp4', 'Slow', 'mp4', 'ページ内',
                                                            {'Referer': base + '/video.html'})]),
          lambda: getattr(job('Slow'), 'state', None) == appmod.RUNNING and (job('Slow').progress or 0) > 0.2
+         and 'ダウンロード中 1' in app.form.Text and not titles.append(app.form.Text)
          and not app.handle({'cmd': 'pause', 'ids': [job('Slow').id]})),
         ('', lambda: None, lambda: job('Slow').state == appmod.PAUSED),
         ('再開', lambda: app.handle({'cmd': 'resume', 'ids': [job('Slow').id]}),
@@ -170,7 +180,8 @@ def drive(app):
             print(f'ok: {steps[i][0]}')
         if i + 1 == len(steps):
             timer.Stop()
-            result.update(step='done', view=view, js_cookie=app.cands[0].headers.get('Cookie'))
+            result.update(step='done', view=view, js_cookie=app.cands[0].headers.get('Cookie'), titles=titles,
+                          final_title=app.form.Text)
             app.form.Close()
             return
         state['i'], state['since'] = i + 1, time.time()
@@ -192,4 +203,6 @@ with open(os.path.join(outdir, 'Slow.mp4'), 'rb') as fh:
 assert any(r.startswith('bytes=') and not r.startswith('bytes=0-') for r in RANGES), RANGES  # resumed, not restarted
 assert result['js_cookie'] and 'sess=abc' in result['js_cookie'], result['js_cookie']
 assert result['view'] == {'tab': 'found', 'found': 1, 'captured': 1, 'queue': 3}, result['view']
+print('title while downloading:', result['titles'], '/ at the end:', result['final_title'])
+assert result['final_title'] == '動画ダウンローダー — 完了 3', result['final_title']
 print('app ok')

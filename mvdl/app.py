@@ -35,7 +35,7 @@ clr.AddReference(os.path.join(LIB, 'Microsoft.Web.WebView2.Core.dll'))
 clr.AddReference(os.path.join(LIB, 'Microsoft.Web.WebView2.WinForms.dll'))
 
 from Microsoft.Web.WebView2.Core import CoreWebView2Environment, CoreWebView2HostResourceAccessKind  # noqa: E402
-from Microsoft.Web.WebView2.WinForms import CoreWebView2CreationProperties, WebView2  # noqa: E402
+from Microsoft.Web.WebView2.WinForms import WebView2  # noqa: E402
 from System.Drawing import Color, Size  # noqa: E402
 from System.Threading import ApartmentState, Thread, ThreadStart  # noqa: E402
 from System.Windows.Forms import (  # noqa: E402
@@ -103,19 +103,74 @@ class Job:
     files: list = field(default_factory=list)
 
 
+class BrowserTab:
+    """One tab of the built-in browser: its own WebView2 (sharing the profile) and what it loaded."""
+
+    def __init__(self, app, tid, url=None, new_window=None):
+        self.app, self.id = app, tid
+        self.capture = Capture()
+        self.core = None
+        self.url, self.new_window = url, new_window  # what to show once ready
+        self.web = WebView2()
+        self.web.Visible = False
+        self.web.CoreWebView2InitializationCompleted += self.on_ready
+        app.form.Controls.Add(self.web)
+        self.web.BringToFront()
+        self.web.EnsureCoreWebView2Async(app.env)
+
+    def on_ready(self, sender, e):
+        app = self.app
+        if not e.IsSuccess:
+            app.send('browserFailed', text=f'ブラウザを使えません: {e.InitializationException}')
+            return
+        core = self.core = self.web.CoreWebView2
+        core.WebResourceResponseReceived += lambda s, a: app.on_response(self, a)
+        core.NavigationStarting += lambda s, a: app.on_navigation(self, a)
+        core.SourceChanged += lambda s, a: app.tab_changed(self)
+        core.DocumentTitleChanged += lambda s, a: app.tab_changed(self)
+        core.NewWindowRequested += lambda s, a: app.on_new_window(self, a)
+        core.WindowCloseRequested += lambda s, a: app.close_tab(self.id)  # window.close()
+        if self.new_window:  # a link / window.open of another tab: this tab is that new window
+            args, deferral = self.new_window
+            args.NewWindow = core
+            args.Handled = True
+            deferral.Complete()
+        elif self.url:
+            app.navigate(self.url, self)
+        app.tab_ready(self)
+
+    @property
+    def title(self):
+        if not self.core:
+            return '読み込み中…'
+        return self.core.DocumentTitle or self.core.Source or '新しいタブ'
+
+    @property
+    def source(self):
+        return self.core.Source if self.core else (self.url or '')
+
+    def close(self):
+        self.web.Visible = False
+        self.app.form.Controls.Remove(self.web)
+        self.web.Dispose()
+
+
 class App:
     def __init__(self, start_url=None):
         self.q = queue.Queue()        # (kind, payload) from worker threads, drained by a UI timer
-        self.capture = Capture()
-        self.checked = {}             # captured url -> Candidate after the check (resolution / size ...)
+        self.checked = {}             # (tab id, captured url) -> Candidate after the check (resolution / size ...)
         self.checker = ThreadPoolExecutor(2)  # checks of what the browser loaded: two at a time
         self.searching = False
         self.cands = []
         self.jobs = {}                # id -> Job, in the order they were added
         self.job_ids = (f'j{n}' for n in itertools.count())
+        self.browsers = {}            # tab id -> BrowserTab, in the order they were opened
+        self.active = None            # id of the tab shown
+        self.tab_ids = (f'b{n}' for n in itertools.count())
+        self.slot = {}                # where the page wants the browser (device pixels)
+        self.env = None               # one WebView2 environment for the interface and every tab
         self.timers = set()           # keep task-wait timers alive
         self.ui_core = None           # CoreWebView2 of the interface page
-        self.core = None              # CoreWebView2 of the built-in browser
         self.ui_ready = False         # the page said 'ready': messages can go out
         self.outbox = []              # messages waiting for the page
         self.start_url = start_url
@@ -130,21 +185,11 @@ class App:
         f.Size = Size(1500, 940)
         f.MinimumSize = Size(1100, 680)
         f.BackColor = Color.FromArgb(31, 31, 31) if self.dark else Color.FromArgb(243, 243, 243)
-
-        props = CoreWebView2CreationProperties()
-        props.UserDataFolder = os.path.join(DATA, 'webview2')  # cookies / logins / passed checks persist
         self.ui = WebView2()
         self.ui.Dock = DockStyle.Fill
         self.ui.DefaultBackgroundColor = f.BackColor
-        self.ui.CreationProperties = props
         self.ui.CoreWebView2InitializationCompleted += self.on_ui_ready
-        self.web = WebView2()
-        self.web.Visible = False
-        self.web.CreationProperties = props
-        self.web.CoreWebView2InitializationCompleted += self.on_web_ready
-        f.Controls.Add(self.web)
         f.Controls.Add(self.ui)
-        self.web.BringToFront()
 
         f.Load += lambda s, e: self.on_load()
         f.HandleCreated += lambda s, e: self.dark_title_bar()
@@ -154,14 +199,45 @@ class App:
         self.ticker.Tick += lambda s, e: self.poll()
         self.ticker.Start()
 
+    # the tab shown (the search, the address bar and the tests work on it)
+    @property
+    def tab(self):
+        return self.browsers.get(self.active)
+
+    @property
+    def core(self):
+        return self.tab.core if self.tab else None
+
+    @property
+    def web(self):
+        return self.tab.web if self.tab else None
+
+    @property
+    def capture(self):
+        return self.tab.capture if self.tab else Capture()
+
     # ---- start ------------------------------------------------------------------------------------
     def on_load(self):
         try:
             CoreWebView2Environment.SetLoaderDllFolderPath(LIB)
-            self.ui.EnsureCoreWebView2Async(None)
-            self.web.EnsureCoreWebView2Async(None)
+            # cookies / logins / passed checks persist here, shared by every tab
+            task = CoreWebView2Environment.CreateAsync(None, os.path.join(DATA, 'webview2'), None)
         except Exception as e:  # noqa: BLE001
             self.browser_missing(e)
+            return
+
+        def ready():
+            if task.IsFaulted:
+                self.browser_missing(task.Exception)
+                return
+            self.env = task.Result
+            self.ui.EnsureCoreWebView2Async(self.env)
+            urls = [u for u in self.settings.get('tabs') or [self.settings.get('last_url')] if u] or [None]
+            for u in urls:
+                self.new_tab(u, activate=False)
+            self.activate(next(iter(self.browsers)))
+
+        self.when_done([task], ready)
 
     def dark_title_bar(self):
         if not self.dark:
@@ -194,24 +270,15 @@ class App:
         core.WebMessageReceived += self.on_message
         core.Navigate('https://mvdl.ui/index.html')
 
-    def on_web_ready(self, sender, e):
-        if not e.IsSuccess:
-            self.send('browserFailed', text=f'ブラウザを使えません: {e.InitializationException}')
-            return
-        core = self.core = self.web.CoreWebView2
-        core.WebResourceResponseReceived += self.on_response
-        core.NavigationStarting += self.on_navigation
-        core.SourceChanged += lambda s, a: self.send('browser', url=core.Source)
-        core.NewWindowRequested += self.on_new_window
-        self.log(f'ブラウザ: WebView2 {core.Environment.BrowserVersionString}')
-        if os.environ.get('MVDL_STARTUP_CHECK'):  # build check: the exe starts and its browser comes up
-            with open(os.environ['MVDL_STARTUP_CHECK'], 'w', encoding='utf-8') as fh:
-                fh.write(core.Environment.BrowserVersionString)
-            self.form.Close()
-            return
-        last = self.settings.get('last_url')
-        if last:
-            core.Navigate(last)
+    def tab_ready(self, tab):
+        if len(self.browsers) == 1 and tab.id == self.active and tab.core:
+            self.log(f'ブラウザ: WebView2 {tab.core.Environment.BrowserVersionString}')
+            if os.environ.get('MVDL_STARTUP_CHECK'):  # build check: the exe starts and its browser comes up
+                with open(os.environ['MVDL_STARTUP_CHECK'], 'w', encoding='utf-8') as fh:
+                    fh.write(tab.core.Environment.BrowserVersionString)
+                self.form.Close()
+                return
+        self.tab_changed(tab)
 
     # ---- talking to the page ------------------------------------------------------------------------
     def send(self, type_, **data):
@@ -238,8 +305,7 @@ class App:
             for msg in self.outbox:
                 self.ui_core.PostWebMessageAsJson(msg)
             self.outbox.clear()
-            if self.core:
-                self.send('browser', url=self.core.Source)
+            self.send_tabs()
         elif cmd == 'findUrl':
             self.find_url(m.get('url'))
         elif cmd == 'openInBrowser':
@@ -250,8 +316,15 @@ class App:
             self.navigate(m.get('url'))
         elif cmd in ('back', 'forward', 'reload') and self.core:
             {'back': self.core.GoBack, 'forward': self.core.GoForward, 'reload': self.core.Reload}[cmd]()
+        elif cmd == 'newTab':
+            self.new_tab(m.get('url'))
+        elif cmd == 'closeTab':
+            self.close_tab(m.get('id'))
+        elif cmd == 'switchTab':
+            self.activate(m.get('id'))
         elif cmd == 'slot':
-            self.place_browser(m)
+            self.slot = m
+            self.place_browser()
         elif cmd == 'enqueue':
             if m.get('from') == 'captured':
                 self.enqueue_captured(m.get('ids') or [])
@@ -274,14 +347,17 @@ class App:
         elif cmd == 'set':
             self.set_option(m.get('key'), m.get('value'))
 
-    def place_browser(self, m):
-        """Lay the browser over the page's 「ブラウザ」 area (device pixels, from the page)."""
-        if m.get('visible') and m.get('w', 0) > 0 and m.get('h', 0) > 0:
-            self.web.SetBounds(int(m['x']), int(m['y']), int(m['w']), int(m['h']))
-            self.web.Visible = True
-            self.web.BringToFront()
-        else:
-            self.web.Visible = False
+    def place_browser(self):
+        """Lay the shown tab over the page's 「ブラウザ」 area (device pixels, from the page); hide the rest."""
+        m = self.slot
+        show = m.get('visible') and m.get('w', 0) > 0 and m.get('h', 0) > 0
+        for tab in self.browsers.values():
+            if show and tab.id == self.active:
+                tab.web.SetBounds(int(m['x']), int(m['y']), int(m['w']), int(m['h']))
+                tab.web.Visible = True
+                tab.web.BringToFront()
+            else:
+                tab.web.Visible = False
 
     def log(self, msg):
         self.send('log', text=msg)
@@ -289,62 +365,113 @@ class App:
     def status(self, text):
         self.send('status', text=text)
 
-    # ---- browser ----------------------------------------------------------------------------------
-    def on_navigation(self, sender, e):
-        if not e.IsRedirected:  # a new page: what the previous one loaded no longer counts
-            self.capture.reset()
-            self.checked.clear()
-            self.send('capturedReset')
+    # ---- browser tabs -------------------------------------------------------------------------------
+    def new_tab(self, url=None, new_window=None, activate=True):
+        if self.env is None:
+            return None
+        tab = BrowserTab(self, next(self.tab_ids), normalized(url) if url else None, new_window)
+        self.browsers[tab.id] = tab
+        if activate:
+            self.activate(tab.id)
+        else:
+            self.send_tabs()
+        return tab
 
-    def on_response(self, sender, e):
-        """Every response the browser receives (all frames). Cheap unless it is a video."""
+    def close_tab(self, tid):
+        tab = self.browsers.pop(tid, None)
+        if not tab:
+            return
+        for key in [k for k in self.checked if k[0] == tid]:
+            del self.checked[key]
+        self.send('capturedRemove', tab=tid)
+        tab.close()
+        if self.active == tid:
+            ids = list(self.browsers)
+            self.active = None
+            if ids:
+                self.activate(ids[-1])
+        self.send_tabs()
+        self.place_browser()
+
+    def activate(self, tid):
+        if tid not in self.browsers:
+            return
+        self.active = tid
+        self.place_browser()
+        self.send_tabs()
+
+    def send_tabs(self):
+        self.send('browserTabs', active=self.active,
+                  tabs=[{'id': t.id, 'title': t.title, 'url': t.source} for t in self.browsers.values()])
+        self.send('browser', url=self.tab.source if self.tab else '')
+
+    def tab_changed(self, tab):
+        self.send_tabs()
+
+    def on_navigation(self, tab, e):
+        if not e.IsRedirected:  # a new page: what the previous one loaded no longer counts
+            tab.capture.reset()
+            for key in [k for k in self.checked if k[0] == tab.id]:
+                del self.checked[key]
+            self.send('capturedRemove', tab=tab.id)
+
+    def on_response(self, tab, e):
+        """Every response a tab receives (all frames). Cheap unless it is a video."""
         uri = e.Request.Uri
         mime = e.Response.Headers.GetHeader('Content-Type') if e.Response.Headers.Contains('Content-Type') else ''
         if not is_media(uri, mime):
             return
-        m = self.capture.add(uri, mime, {kv.Key: kv.Value for kv in e.Request.Headers})
+        m = tab.capture.add(uri, mime, {kv.Key: kv.Value for kv in e.Request.Headers})
         if m:
-            self.send_captured(m, {'check': '確認中…'})
-            [cand] = self.capture.candidates(self.core.Source, self.core.DocumentTitle, self.core.Settings.UserAgent,
-                                             urls={m.url})
-            self.checker.submit(self.check_captured, m, cand)
+            self.send_captured(tab, m, {'check': '確認中…'})
+            [cand] = tab.capture.candidates(tab.core.Source, tab.core.DocumentTitle, tab.core.Settings.UserAgent,
+                                            urls={m.url})
+            self.checker.submit(self.check_captured, tab, m, cand)
 
-    def send_captured(self, m, info):
+    def send_captured(self, tab, m, info):
         kind = kind_of(m.url)
-        self.send('captured', item={'id': m.url, 'url': m.url, 'mime': m.mime or '—',
+        self.send('captured', item={'id': f'{tab.id}|{m.url}', 'tab': tab.title, 'url': m.url, 'mime': m.mime or '—',
                                     'kind': 'mp4' if kind == '動画' else kind,
                                     'time': time.strftime('%H:%M:%S', time.localtime(m.at)),
                                     'resolution': '—', 'duration': '—', 'size': '—', 'note': ''} | info)
 
-    def check_captured(self, m, cand):
+    def check_captured(self, tab, m, cand):
         """Worker: resolution / duration / size of one captured video (same check as the search)."""
         notes = []
         try:
             c, _ = probe.check(cand, notes.append)
         except Exception as e:  # noqa: BLE001
             c, notes = None, [str(e)]
-        self.q.put(('checked', (m, c, notes[-1] if notes else '')))
+        self.q.put(('checked', (tab, m, c, notes[-1] if notes else '')))
 
-    def on_new_window(self, sender, e):
-        """Links that open a new tab stay in this browser (so their videos are seen). Sized pop-ups
-        (sign-in windows) open as pop-ups."""
-        if not e.WindowFeatures.HasSize:
-            e.Handled = True
-            self.core.Navigate(e.Uri)
+    def on_new_window(self, tab, e):
+        """A link to a new tab / window.open: open it as another tab, as that very window (window.opener
+        and sign-in pop-ups keep working), so its videos are seen too."""
+        deferral = e.GetDeferral()
+        if not self.new_tab(new_window=(e, deferral)):
+            deferral.Complete()
 
-    def navigate(self, url):
+    def navigate(self, url, tab=None):
         url = normalized(url)
-        if not url or not self.core:
+        if not url:
+            return
+        tab = tab or self.tab
+        if not tab:
+            self.new_tab(url)
+            return
+        if not tab.core:
+            tab.url = url
             return
         try:
-            self.core.Navigate(url)
+            tab.core.Navigate(url)
         except Exception as e:  # noqa: BLE001 - bad URL
             self.log(f'開けませんでした: {url} ({e})')
 
     def open_in_browser(self, url):
+        """In a new tab (the open ones stay as they are)."""
         url = normalized(url)
         if url:
-            self.navigate(url)
+            self.new_tab(url)
             self.send('tab', name='browser')
 
     def clipboard_url(self):
@@ -369,9 +496,9 @@ class App:
         timer.Tick += tick
         timer.Start()
 
-    def cookies(self, urls, then):
+    def cookies(self, core, urls, then):
         """then({url: Cookie header}) with the browser's cookies for each URL."""
-        tasks = {u: self.core.CookieManager.GetCookiesAsync(u) for u in urls}
+        tasks = {u: core.CookieManager.GetCookiesAsync(u) for u in urls}
 
         def ready():
             then({u: '; '.join(f'{c.Name}={c.Value}' for c in t.Result)
@@ -405,7 +532,8 @@ class App:
         """The page open in the browser: what it loaded, its DOM now, and yt-dlp with its cookies."""
         if self.searching:
             return
-        core = self.core
+        tab = self.tab
+        core = tab.core if tab else None
         page_url = core.Source if core else ''
         if not page_url.startswith('http'):
             self.status('「ブラウザ」タブでページを開いてから押してください')
@@ -423,7 +551,7 @@ class App:
                     html = json.loads(html_task.Result) or ''
                 except (ValueError, TypeError):
                     pass
-            captured = self.capture.candidates(page_url, title, ua, cookies.get)
+            captured = tab.capture.candidates(page_url, title, ua, cookies.get)
             headers = {'User-Agent': ua} | ({'Cookie': cookies[page_url]} if cookies.get(page_url) else {})
             log = lambda m: self.q.put(('log', m))  # noqa: E731
 
@@ -436,7 +564,7 @@ class App:
 
             threading.Thread(target=work, daemon=True).start()
 
-        self.when_done([html_task], lambda: self.cookies([page_url, *list(self.capture.media)[:40]], with_cookies))
+        self.when_done([html_task], lambda: self.cookies(core, [page_url, *list(tab.capture.media)[:40]], with_cookies))
 
     def set_searching(self, on):
         self.searching = on
@@ -466,11 +594,11 @@ class App:
                     self.status('Cloudflare の確認画面（ボット対策）で止められました')
                     self.send('blocked', url=v)
                 elif kind == 'checked':
-                    m, c, note = v
-                    if self.capture.media.get(m.url) is m:  # still the page it came from
+                    tab, m, c, note = v
+                    if self.browsers.get(tab.id) is tab and tab.capture.media.get(m.url) is m:  # still that page
                         if c is not None:
-                            self.checked[m.url] = c
-                        self.send_captured(m, {
+                            self.checked[(tab.id, m.url)] = c
+                        self.send_captured(tab, m, {
                             'check': '動画ではない' if c is None else '未確認' if '未確認' in c.source else '確認済み',
                             'note': note,
                             **({} if c is None else {'resolution': c.resolution or '—',
@@ -482,6 +610,7 @@ class App:
                     if job:
                         job.progress, job.text = frac, text
                         self.send_job(job)
+                        self.update_title()
                 elif kind == 'job-end':
                     job_id, state, text = v
                     job = self.jobs.get(job_id)
@@ -511,6 +640,21 @@ class App:
         states = [j.state for j in self.jobs.values()]
         self.send('queueStats', parts=[[s, states.count(s)] for s in (RUNNING, WAITING, PAUSED, DONE, FAILED, CANCELLED)
                                        if states.count(s)])
+        self.update_title()
+
+    def update_title(self):
+        """The window title shows the downloads, not the page in the browser:
+        「動画ダウンローダー — ダウンロード中 2・待機 3（45%）」, just the name when nothing is going on."""
+        states = [j.state for j in self.jobs.values()]
+        if not any(s in (RUNNING, WAITING, PAUSED) for s in states):
+            text = APP + (f' — 完了 {states.count(DONE)}' if DONE in states else '')
+        else:
+            parts = [f'{s} {states.count(s)}' for s in (RUNNING, WAITING, PAUSED, FAILED) if s in states]
+            known = [j.progress for j in self.jobs.values() if j.state == RUNNING and j.progress is not None]
+            pct = f'（{sum(known) / len(known) * 100:.0f}%）' if known else ''
+            text = f'{APP} — {"・".join(parts)}{pct}'
+        if self.form.Text != text:
+            self.form.Text = text
 
     def start_jobs(self):
         """Start waiting jobs, oldest first, up to the chosen number at once."""
@@ -547,17 +691,24 @@ class App:
             self.q.put(('log', f'保存しました: {p}'))
         self.q.put(('job-end', (job.id, DONE, None)))
 
-    def enqueue_captured(self, urls):
-        """As the browser loaded them (no check), with the cookies it sent or holds."""
-        if not urls or not self.core:
-            return
-        core = self.core
+    def enqueue_captured(self, ids):
+        """As the browser loaded them, with the cookies it sent or holds. ids: "<tab id>|<url>"."""
+        by_tab = {}
+        for i in ids:
+            tid, _, url = i.partition('|')
+            if tid in self.browsers and self.browsers[tid].core:
+                by_tab.setdefault(tid, []).append(url)
+        for tid, urls in by_tab.items():
+            self.enqueue_from_tab(self.browsers[tid], urls)
+
+    def enqueue_from_tab(self, tab, urls):
+        core = tab.core
         page_url, title, ua = core.Source, core.DocumentTitle, core.Settings.UserAgent
 
         def ready(cookies):
-            cands = self.capture.candidates(page_url, title, ua, cookies.get, set(urls))
+            cands = tab.capture.candidates(page_url, title, ua, cookies.get, set(urls))
             for c in cands:
-                done = self.checked.get(c.url)
+                done = self.checked.get((tab.id, c.url))
                 if done:  # what the check found (size for the list)
                     c.resolution, c.duration, c.size, c.size_approx = (done.resolution, done.duration, done.size,
                                                                        done.size_approx)
@@ -566,7 +717,7 @@ class App:
                     c.source = 'ブラウザ（未確認）'
             self.add_jobs(cands)
 
-        self.cookies(urls, ready)
+        self.cookies(core, urls, ready)
 
     def add_jobs(self, sel):
         active = {(j.cand.url, j.quality) for j in self.jobs.values() if j.state in (WAITING, RUNNING)}
@@ -654,8 +805,9 @@ class App:
         self.save()
 
     def save(self):
+        tabs = [t.source for t in self.browsers.values() if t.source.startswith('http')]
         save_settings({'outdir': self.outdir, 'quality': self.quality, 'parallel': self.parallel,
-                       'last_url': self.core.Source if self.core else self.settings.get('last_url', '')})
+                       'tabs': tabs if self.browsers else self.settings.get('tabs', [])})
 
     def on_closing(self, sender, e):
         left = sum(j.state in (WAITING, RUNNING, PAUSED) for j in self.jobs.values())

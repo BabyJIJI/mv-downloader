@@ -136,6 +136,19 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
 /* ---- browser */
 .address { display: flex; gap: 6px; align-items: center; }
 .address input { flex: 1; }
+.btabs { display: flex; gap: 4px; align-items: center; overflow-x: auto; min-height: 34px; }
+.btab { display: inline-flex; align-items: center; gap: 4px; max-width: 220px; height: 30px; padding: 0 4px 0 12px;
+        border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); cursor: pointer; flex: none; }
+.btab:hover { background: var(--row-hover); color: var(--text); }
+.btab.on { background: var(--panel); color: var(--text); border-color: var(--line-strong); box-shadow: var(--shadow); font-weight: 600; }
+.btab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btab .x { width: 22px; height: 22px; border: 0; border-radius: 4px; background: none; cursor: pointer; color: inherit;
+           display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.btab .x:hover { background: var(--line); }
+.btab .x svg, .btab-new svg { width: 12px; height: 12px; }
+.btab-new { width: 30px; height: 30px; border-radius: 6px; border: 1px dashed var(--line-strong); background: none; cursor: pointer;
+            color: var(--muted); display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.btab-new:hover { background: var(--row-hover); color: var(--text); }
 #browser-slot { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
                 display: flex; align-items: center; justify-content: center; color: var(--faint); overflow: hidden; }
 
@@ -232,6 +245,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
   </section>
 
   <section class="view" data-view="browser">
+    <div class="btabs" id="btabs"></div>
     <div class="address">
       <button class="btn icon" id="back" title="戻る"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
       <button class="btn icon" id="forward" title="進む"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
@@ -245,8 +259,8 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); m
   <section class="view" data-view="captured">
     <div class="toolbar"><span class="note">ブラウザが動画として受け取った通信です。解像度などは裏で確かめて追記します（「未確認」はこちらから取得できなかったもの。理由はマウスを載せると出ます）。選んで「ダウンロードに追加」できます。</span></div>
     <div class="table-wrap"><table id="captured">
-      <colgroup><col style="width:36px"><col style="width:78px"><col style="width:76px"><col style="width:104px"><col style="width:66px"><col style="width:92px"><col style="width:96px"><col></colgroup>
-      <thead><tr><th class="check"><input type="checkbox" data-all></th><th>時刻</th><th>種類</th><th>解像度</th><th>長さ</th><th>サイズ</th><th>確認</th><th>URL</th></tr></thead>
+      <colgroup><col style="width:36px"><col style="width:78px"><col style="width:150px"><col style="width:76px"><col style="width:104px"><col style="width:66px"><col style="width:92px"><col style="width:96px"><col style="min-width:200px"></colgroup>
+      <thead><tr><th class="check"><input type="checkbox" data-all></th><th>時刻</th><th>タブ</th><th>種類</th><th>解像度</th><th>長さ</th><th>サイズ</th><th>確認</th><th>URL</th></tr></thead>
       <tbody></tbody>
     </table></div>
   </section>
@@ -340,7 +354,7 @@ function paint(t) {
 }
 
 const found = makeTable('found', 6, () => enqueue('found'));
-const captured = makeTable('captured', 7, () => enqueue('captured'));
+const captured = makeTable('captured', 8, () => enqueue('captured'));
 const queue = makeTable('queue', 5, id => send('openFolder', {id}));
 
 const SOURCE = s => s.includes('未確認') ? `<span class="badge warn">${esc(s)}</span>` : `<span class="badge gray">${esc(s)}</span>`;
@@ -352,7 +366,7 @@ function foundRow(v) {
 }
 const CHECK = {'確認済み': 'ok', '未確認': 'warn', '動画ではない': 'gray', '確認中…': 'gray'};
 function capturedRow(v) {
-  return `<td class="num">${esc(v.time)}</td><td><span class="badge">${esc(v.kind)}</span></td>
+  return `<td class="num">${esc(v.time)}</td><td title="${esc(v.tab)}">${esc(v.tab)}</td><td><span class="badge">${esc(v.kind)}</span></td>
     <td class="num">${esc(v.resolution)}</td><td class="num">${esc(v.duration)}</td><td class="num">${esc(v.size)}</td>
     <td title="${esc(v.note || v.check)}"><span class="badge ${CHECK[v.check] || 'gray'}">${esc(v.check)}</span></td>
     <td title="${esc(v.url)}\n${esc(v.mime)}"><div>${esc(v.url)}</div><div class="sub">${esc(v.mime)}</div></td>`;
@@ -407,6 +421,17 @@ $('#browse').onclick = () => send('browse');
 for (const key of ['outdir', 'quality', 'parallel']) $('#' + key).addEventListener('change', e => send('set', {key, value: e.target.value}));
 const address = $('#address');
 address.addEventListener('keydown', e => { if (e.key === 'Enter') send('navigate', {url: address.value}); });
+$('#btabs').addEventListener('click', e => {
+  const close = e.target.closest('[data-close]');
+  if (close) { send('closeTab', {id: close.dataset.close}); return; }
+  if (e.target.closest('#btab-new')) { send('newTab'); address.focus(); return; }
+  const t = e.target.closest('.btab');
+  if (t) send('switchTab', {id: t.dataset.id});
+});
+$('#btabs').addEventListener('auxclick', e => {  // middle click closes, as in a browser
+  const t = e.target.closest('.btab');
+  if (t && e.button === 1) send('closeTab', {id: t.dataset.id});
+});
 $('#back').onclick = () => send('back');
 $('#forward').onclick = () => send('forward');
 $('#reload').onclick = () => send('reload');
@@ -452,7 +477,20 @@ const handlers = {
     if (m.items.length) found.sel.add(m.items[0].id);
     found.render();
   },
-  capturedReset() { captured.clear(); $('#captured-count').textContent = 0; },
+  capturedRemove(m) {
+    [...captured.rows.keys()].filter(id => id.startsWith(m.tab + '|')).forEach(id => captured.remove(id));
+    captured.render(); $('#captured-count').textContent = captured.rows.size;
+  },
+  browserTabs(m) {
+    const X = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>';
+    const PLUS = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 2v8M2 6h8"/></svg>';
+    $('#btabs').innerHTML = m.tabs.map(t =>
+      `<div class="btab${t.id === m.active ? ' on' : ''}" data-id="${esc(t.id)}" title="${esc(t.title)}\n${esc(t.url)}">
+         <span>${esc(t.title)}</span><button class="x" data-close="${esc(t.id)}" title="タブを閉じる">${X}</button></div>`).join('')
+      + `<button class="btab-new" id="btab-new" title="新しいタブ">${PLUS}</button>`;
+    if (!m.tabs.length) $('#browser-slot').textContent = '＋ で新しいタブを開くか、左の「ブラウザで開く」を使ってください';
+    reportSlot();
+  },
   captured(m) { captured.set(m.item.id, capturedRow(m.item)); $('#captured-count').textContent = captured.rows.size; },
   browser(m) { if (document.activeElement !== address) address.value = m.url; },
   job(m) { queue.set(m.item.id, jobRow(m.item)); },
