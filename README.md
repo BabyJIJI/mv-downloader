@@ -18,7 +18,7 @@ Web ページに埋め込まれた動画を保存する Windows 用の GUI ツ�
 |---|---|---|
 | 1 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | YouTube・Vimeo・X など、yt-dlp が対応する約 1,800 サイト。HTML に `<video>` があるページ |
 | 2 | ページの HTML を読む | `<video>` / `<source>`、`og:video`、スクリプト内の `.mp4` `.m3u8` `.mpd` の URL、YouTube などの埋め込み iframe |
-| 3 | Edge で再生して通信を見る | JavaScript でプレーヤーを読み込むページ。ヘッドレスの Edge でページを開き、動画をミュート再生して、動画や HLS/DASH マニフェストの URL を拾う。Cookie と Referer も引き継ぐ |
+| 3 | Edge で再生して通信を見る | JavaScript でプレーヤーを読み込むページ、クリックしないと動画が出ないページ。ヘッドレスの Edge でページを開き、動画をミュート再生し、再生ボタンやプレーヤーを本物のマウス操作でクリックして、動画や HLS/DASH マニフェストの URL を拾う。別サイトのプレーヤー（iframe）、クリックで開いた新しいタブ、Worker の通信も見る。Cookie と Referer も引き継ぐ |
 
 3 は画面の「見つからないときは Edge で再生して探す」で切り替えられる（20 秒ほどかかる）。
 

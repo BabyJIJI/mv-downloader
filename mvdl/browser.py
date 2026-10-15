@@ -1,7 +1,13 @@
-"""For pages that load the player with JavaScript: open the page in headless Edge, start every <video>
-muted, and pick the media URLs (mp4 / HLS / DASH manifests) out of the network traffic.
+"""For pages that load the player with JavaScript: open the page in Edge, get the video going, and pick
+the media URLs (mp4 / HLS / DASH manifests) out of the network traffic.
 
-Talks to the browser over the DevTools protocol directly, so no Playwright / browser download is needed.
+Headless (automatic): every <video> is started muted, and the play buttons / players are clicked with real
+(trusted) mouse events, since many players only load the video after a click.
+Visible: the user passes Cloudflare, logs in and clicks play; we only watch.
+
+The whole browser is watched, not one tab: clicking play often loads the video in a cross-origin player
+iframe, a new tab, or a worker. Talks to the browser over the DevTools protocol directly, so no
+Playwright / browser download is needed.
 """
 import json
 import os
@@ -18,6 +24,7 @@ from .tools import find_browser
 MEDIA_MIME = ('video/', 'application/vnd.apple.mpegurl', 'application/x-mpegurl', 'audio/mpegurl',
               'application/dash+xml')
 SEGMENT_EXT = ('ts', 'm4s', 'aac', 'm4a', 'cmfv', 'cmfa', 'key')
+NETWORK_TARGETS = ('page', 'iframe', 'worker', 'shared_worker', 'service_worker')
 
 # Runs in every frame: keep trying to start the videos (muted, so autoplay is allowed).
 AUTOPLAY_JS = r'''
@@ -26,15 +33,37 @@ AUTOPLAY_JS = r'''
     for (const v of document.querySelectorAll('video')) {
       if (v.paused) { v.muted = true; v.play && v.play().catch(() => {}); }
     }
-    for (const b of document.querySelectorAll(
-        '.vjs-big-play-button, .ytp-large-play-button, .plyr__control--overlaid, [aria-label*="Play" i], [class*="play-button" i]')) {
-      if (!b.dataset.mvdlClicked) { b.dataset.mvdlClicked = '1'; try { b.click(); } catch (e) {} }
-    }
   };
   setInterval(kick, 1000);
   document.addEventListener('DOMContentLoaded', kick);
 })();
 '''
+
+# The n-th thing worth clicking, scrolled into view: play buttons first, then players / posters /
+# thumbnails, larger first. Returns "[x, y]" (viewport coordinates of its center) or null.
+PICK_JS = r'''
+((n) => {
+  const area = e => { const r = e.getBoundingClientRect(); return r.width * r.height; };
+  const shown = e => {
+    const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width >= 24 && r.height >= 24 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
+  };
+  const label = e => [e.getAttribute('aria-label'), e.getAttribute('title'), e.id,
+                      typeof e.className === 'string' ? e.className : e.className && e.className.baseVal].join(' ');
+  const playRe = /(^|[^a-z])play(?!list)|再生/i;
+  const buttons = [...document.querySelectorAll('[class*="play" i], [id*="play" i], [aria-label], [title]')]
+    .filter(e => playRe.test(label(e)) && shown(e)).sort((a, b) => area(b) - area(a));
+  const players = [...document.querySelectorAll(
+      'video, iframe, [class*="player" i], [id*="player" i], [class*="poster" i], [class*="thumb" i]')]
+    .filter(shown).sort((a, b) => area(b) - area(a));
+  const e = [...new Set([...buttons, ...players])][n];
+  if (!e) return null;
+  e.scrollIntoView({block: 'center', inline: 'center'});
+  const r = e.getBoundingClientRect();
+  return JSON.stringify([r.left + r.width / 2, r.top + r.height / 2]);
+})
+'''
+CLICK_AT = (2, 5, 9, 14)  # headless: seconds after the page loaded; one more thing clicked each time
 
 
 class CDPError(Exception):
@@ -42,22 +71,27 @@ class CDPError(Exception):
 
 
 class CDP:
+    """One browser-level connection; targets are reached through flattened sessions."""
+
     def __init__(self, ws_url):
         self.ws = websocket.create_connection(ws_url, timeout=30, suppress_origin=True)
         self.n = 0
         self.pending = []
 
-    def call(self, method, **params):
+    def call(self, method, session=None, **params):
         self.n += 1
+        msg = {'id': self.n, 'method': method, 'params': params}
+        if session:
+            msg['sessionId'] = session
         self.ws.settimeout(30)
-        self.ws.send(json.dumps({'id': self.n, 'method': method, 'params': params}))
+        self.ws.send(json.dumps(msg))
         while True:
-            msg = json.loads(self.ws.recv())
-            if msg.get('id') == self.n:
-                if 'error' in msg:
-                    raise CDPError(f"{method}: {msg['error'].get('message')}")
-                return msg.get('result', {})
-            self.pending.append(msg)
+            reply = json.loads(self.ws.recv())
+            if reply.get('id') == self.n:
+                if 'error' in reply:
+                    raise CDPError(f"{method}: {reply['error'].get('message')}")
+                return reply.get('result', {})
+            self.pending.append(reply)
 
     def event(self, timeout):
         if self.pending:
@@ -97,10 +131,7 @@ def profile_dir():
 def _launch(exe, profile, visible):
     args = [exe, '--remote-debugging-port=0', f'--user-data-dir={profile}',
             '--no-first-run', '--no-default-browser-check', '--disable-extensions',
-            '--autoplay-policy=no-user-gesture-required', '--window-size=1280,800',
-            # keep cross-origin iframes in the page's process so their requests show up too
-            '--disable-features=IsolateOrigins,site-per-process', '--disable-site-isolation-trials',
-            'about:blank']
+            '--autoplay-policy=no-user-gesture-required', '--window-size=1280,800', 'about:blank']
     if not visible:
         args[1:1] = ['--headless=new', '--mute-audio']
     port_file = os.path.join(profile, 'DevToolsActivePort')
@@ -122,7 +153,111 @@ def _launch(exe, profile, visible):
     raise RuntimeError('ブラウザに接続できませんでした')
 
 
-def sniff(url, log, wait=20, settle=4, stop=None, visible=False):
+class _Watch:
+    """State of one sniff run: the targets we are attached to and the media requests seen."""
+
+    def __init__(self, cdp, url, ua, visible, log):
+        self.cdp, self.url, self.ua, self.visible, self.log = cdp, url, ua, visible, log
+        self.main = None          # session of our tab
+        self.main_target = None
+        self.loaded_at = None     # when our tab finished loading (headless clicks are timed from it)
+        self.found = {}           # media url -> (session, requestId)
+        self.sent = {}            # (session, requestId) -> headers as sent (Cookie / User-Agent / Referer)
+        self.last = time.time()   # when the last new media URL showed up
+        self.page = {'title': url, 'url': url}
+        self.closed = False
+
+    def attach(self, sid, info):
+        """New target (tab, popup, cross-origin iframe, worker): watch its network, then let it run."""
+        cdp, kind = self.cdp, info.get('type')
+        try:
+            if kind in NETWORK_TARGETS:
+                cdp.call('Network.enable', sid)
+                if not self.visible:
+                    try:
+                        cdp.call('Network.setUserAgentOverride', sid, userAgent=self.ua)
+                    except CDPError:
+                        pass
+            if kind in ('page', 'iframe'):
+                cdp.call('Page.enable', sid)
+                cdp.call('Page.addScriptToEvaluateOnNewDocument', sid, source=AUTOPLAY_JS)
+            cdp.call('Target.setAutoAttach', sid, autoAttach=True, waitForDebuggerOnStart=True, flatten=True)
+        except CDPError:
+            pass
+        finally:
+            try:
+                cdp.call('Runtime.runIfWaitingForDebugger', sid)
+            except CDPError:
+                pass
+        if info.get('targetId') == self.main_target and not self.main:
+            self.main = sid
+            cdp.call('Page.navigate', sid, url=self.url)
+
+    def handle(self, ev):
+        m, p, sid = ev.get('method'), ev.get('params', {}), ev.get('sessionId')
+        if m == 'Target.attachedToTarget':
+            self.attach(p['sessionId'], p['targetInfo'])
+        elif m == 'Target.detachedFromTarget':
+            if p.get('sessionId') == self.main:
+                self.closed = True  # the user closed our tab
+        elif m == 'Network.requestWillBeSent':
+            self.media(p['request']['url'], None, sid, p['requestId'])
+        elif m == 'Network.responseReceived':
+            self.media(p['response']['url'], p['response'].get('mimeType', ''), sid, p['requestId'])
+        elif m == 'Network.requestWillBeSentExtraInfo':
+            h = {k.lower(): v for k, v in p.get('headers', {}).items()}
+            self.sent[(sid, p['requestId'])] = {k: h[k] for k in ('cookie', 'user-agent', 'referer') if k in h}
+        elif m == 'Page.loadEventFired' and sid == self.main:
+            self.loaded_at = self.loaded_at or time.time()
+            self.read_page()
+
+    def media(self, url, mime, sid, rid):
+        if url not in self.found and is_media(url, mime):
+            self.found[url], self.last = (sid, rid), time.time()
+            self.log(f'見つかりました: {url}')
+
+    def read_page(self):
+        try:
+            self.page['title'] = _eval(self.cdp, self.main, 'document.title') or self.page['title']
+            self.page['url'] = _eval(self.cdp, self.main, 'location.href') or self.page['url']
+        except (CDPError, websocket.WebSocketException, OSError):
+            pass
+
+    def click(self, n):
+        """Click the n-th play button / player with a trusted mouse event."""
+        try:
+            pt = _eval(self.cdp, self.main, f'{PICK_JS}({n})')
+            if not pt:
+                return
+            x, y = json.loads(pt)
+            time.sleep(0.3)  # let the scroll settle
+            for kind in ('mouseMoved', 'mousePressed', 'mouseReleased'):
+                self.cdp.call('Input.dispatchMouseEvent', self.main, type=kind, x=x, y=y, button='left',
+                              clickCount=1)
+            self.log('再生ボタン・プレーヤーをクリックしました')
+        except (CDPError, ValueError, TypeError):
+            pass
+
+    def candidates(self):
+        out = []
+        for u, key in self.found.items():
+            h = self.sent.get(key, {})
+            headers = {'Referer': h.get('referer') or self.page['url'], 'User-Agent': h.get('user-agent') or self.ua}
+            cookie = h.get('cookie')
+            if not cookie and self.main and not self.closed:
+                try:
+                    cookies = self.cdp.call('Network.getCookies', self.main, urls=[u]).get('cookies', [])
+                    cookie = '; '.join(f"{c['name']}={c['value']}" for c in cookies)
+                except (CDPError, websocket.WebSocketException, OSError):
+                    pass
+            if cookie:
+                headers['Cookie'] = cookie
+            kind = kind_of(u)
+            out.append(Candidate(u, self.page['title'], 'mp4' if kind == '動画' else kind, 'ブラウザ', headers))
+        return out
+
+
+def sniff(url, log, wait=25, settle=4, stop=None, visible=False):
     """Return the media URLs the page loads.
 
     Headless: stops after `wait` s, or `settle` s after the last new one.
@@ -139,79 +274,47 @@ def sniff(url, log, wait=20, settle=4, stop=None, visible=False):
     if visible:
         wait = 30 * 60
     proc = cdp = None
-    found = {}     # url -> requestId
-    sent = {}      # requestId -> headers as sent (from requestWillBeSentExtraInfo)
-    page = {'title': url, 'url': url}
     try:
         proc, port = _launch(exe, profile, visible)
-        cdp = CDP(_new_tab(port))
+        version = json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/json/version', timeout=10))
+        cdp = CDP(version['webSocketDebuggerUrl'])
         ua = cdp.call('Browser.getVersion')['userAgent'].replace('HeadlessChrome', 'Chrome')
-        cdp.call('Network.enable')
-        if not visible:
-            cdp.call('Network.setUserAgentOverride', userAgent=ua)
-        cdp.call('Page.enable')
-        cdp.call('Page.addScriptToEvaluateOnNewDocument', source=AUTOPLAY_JS)
-        cdp.call('Page.navigate', url=url)
+        w = _Watch(cdp, url, ua, visible, log)
+        # Our own tab: a visible Edge also has hidden pages (side panel, new-tab preload, ...).
+        w.main_target = cdp.call('Target.createTarget', url='about:blank')['targetId']
+        for t in cdp.call('Target.getTargets').get('targetInfos', []):
+            if t['type'] == 'page' and t['targetId'] != w.main_target and t.get('url') == 'about:blank':
+                cdp.call('Target.closeTarget', targetId=t['targetId'])  # the empty startup tab
+        cdp.call('Target.setAutoAttach', autoAttach=True, waitForDebuggerOnStart=True, flatten=True)
+        cdp.call('Target.activateTarget', targetId=w.main_target)
         if visible:
             log('ブラウザの画面で確認（Cloudflare など）やログインを済ませ、動画を再生してください。'
                 '終わったら「完了」を押すか、ブラウザを閉じてください')
 
-        start = last = time.time()
-        while time.time() - start < wait:
+        start, clicks = time.time(), 0
+        while time.time() - start < wait and not w.closed:
             if stop is not None and stop.is_set():
                 break
-            if not visible and found and time.time() - last > settle:
+            if not visible and w.found and time.time() - w.last > settle:
                 break
+            if (not visible and not w.found and w.main and clicks < len(CLICK_AT)
+                    and time.time() - (w.loaded_at or start + 5) > CLICK_AT[clicks]):
+                w.click(clicks)
+                clicks += 1
             try:
                 ev = cdp.event(0.5)
             except (websocket.WebSocketException, OSError):
                 log('ブラウザが閉じられました')
-                cdp = None
+                w.closed, cdp = True, None
                 break
-            if not ev:
-                continue
-            m, p = ev.get('method'), ev.get('params', {})
-            if m == 'Network.requestWillBeSent':
-                u = p['request']['url']
-                if u not in found and is_media(u, None):
-                    found[u], last = p['requestId'], time.time()
-                    log(f'見つかりました: {u}')
-            elif m == 'Network.responseReceived':
-                u = p['response']['url']
-                if u not in found and is_media(u, p['response'].get('mimeType', '')):
-                    found[u], last = p['requestId'], time.time()
-                    log(f'見つかりました: {u}')
-            elif m == 'Network.requestWillBeSentExtraInfo':
-                h = {k.lower(): v for k, v in p.get('headers', {}).items()}
-                sent[p['requestId']] = {k: h[k] for k in ('cookie', 'user-agent', 'referer') if k in h}
-            elif m == 'Page.loadEventFired':
-                try:
-                    page['title'] = _eval(cdp, 'document.title') or page['title']
-                    page['url'] = _eval(cdp, 'location.href') or page['url']
-                except CDPError:
-                    pass
+            if ev:
+                w.handle(ev)
+        if w.closed and cdp:
+            log('ブラウザが閉じられました')
 
-        if cdp:
-            try:
-                page['title'] = _eval(cdp, 'document.title') or page['title']
-                page['url'] = _eval(cdp, 'location.href') or page['url']
-            except (CDPError, websocket.WebSocketException, OSError):
-                pass
-        out = []
-        for u, rid in found.items():
-            h = sent.get(rid, {})
-            headers = {'Referer': h.get('referer') or page['url'], 'User-Agent': h.get('user-agent') or ua}
-            cookie = h.get('cookie')
-            if not cookie and cdp:
-                try:
-                    cookies = cdp.call('Network.getCookies', urls=[u]).get('cookies', [])
-                    cookie = '; '.join(f"{c['name']}={c['value']}" for c in cookies)
-                except (CDPError, websocket.WebSocketException, OSError):
-                    pass
-            if cookie:
-                headers['Cookie'] = cookie
-            kind = kind_of(u)
-            out.append(Candidate(u, page['title'], 'mp4' if kind == '動画' else kind, 'ブラウザ', headers))
+        if not w.closed:
+            w.read_page()
+        out = w.candidates()
         if cdp:  # done with the page: close the window before the (slower) checks
             try:
                 cdp.call('Browser.close')
@@ -223,7 +326,8 @@ def sniff(url, log, wait=20, settle=4, stop=None, visible=False):
         out = keep_videos(out, log)
         out.sort(key=lambda c: (c.kind not in ('HLS', 'DASH'), 'master' not in c.url.lower()))
         if not out:
-            log('ブラウザでも動画は見つかりませんでした')
+            log('ブラウザでも動画は見つかりませんでした'
+                + ('' if visible else '。「ブラウザで開いて探す」で、自分で再生してみてください'))
         return out
     except Exception as e:  # noqa: BLE001
         log(f'ブラウザでの検索に失敗しました: {e}')
@@ -242,23 +346,5 @@ def sniff(url, log, wait=20, settle=4, stop=None, visible=False):
                 proc.kill()
 
 
-def _new_tab(port):
-    """Open our own tab and return its DevTools URL. A visible Edge also has hidden pages (side panel,
-    new-tab preload, ...), so picking "the first page" can drive one the user never sees."""
-    base = f'http://127.0.0.1:{port}'
-    version = json.load(urllib.request.urlopen(base + '/json/version', timeout=10))
-    browser = CDP(version['webSocketDebuggerUrl'])
-    try:
-        tid = browser.call('Target.createTarget', url='about:blank')['targetId']
-        for t in browser.call('Target.getTargets').get('targetInfos', []):
-            # the startup tab: an empty extra window tab
-            if t['type'] == 'page' and t['targetId'] != tid and t.get('url') == 'about:blank':
-                browser.call('Target.closeTarget', targetId=t['targetId'])
-        browser.call('Target.activateTarget', targetId=tid)
-    finally:
-        browser.close()
-    return f'ws://127.0.0.1:{port}/devtools/page/{tid}'
-
-
-def _eval(cdp, expr):
-    return cdp.call('Runtime.evaluate', expression=expr).get('result', {}).get('value')
+def _eval(cdp, session, expr):
+    return cdp.call('Runtime.evaluate', session, expression=expr, returnByValue=True).get('result', {}).get('value')
