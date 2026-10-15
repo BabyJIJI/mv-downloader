@@ -127,8 +127,11 @@ def drive(app):
         task = app.ui_core.ExecuteScriptAsync('JSON.stringify(mvdlView())')
         app.when_done([task], lambda: view.update(json.loads(json.loads(task.Result))))
 
+    # pressed right after start, before the browser is ready: must still open (it used to be dropped)
+    app.handle({'cmd': 'openInBrowser', 'url': base + '/video.html'})
     steps = [
-        ('画面とブラウザの準備', lambda: None, lambda: app.ui_ready and app.core is not None),
+        ('起動直後の「ブラウザで開く」', lambda: None,
+         lambda: app.ui_ready and app.core is not None and app.core.Source == base + '/video.html'),
         ('URL から探す', lambda: app.handle({'cmd': 'set', 'key': 'outdir', 'value': outdir})
          or app.handle({'cmd': 'findUrl', 'url': base + '/video.html'}),
          lambda: not app.searching and found() == [base + '/media/plain.mp4']),

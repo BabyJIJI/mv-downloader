@@ -122,6 +122,8 @@ class BrowserTab:
         app = self.app
         if not e.IsSuccess:
             app.send('browserFailed', text=f'ブラウザを使えません: {e.InitializationException}')
+            app.log(f'ブラウザのタブを開けませんでした: {e.InitializationException}')
+            app.status(f'ブラウザのタブを開けませんでした: {e.InitializationException}')
             return
         core = self.core = self.web.CoreWebView2
         core.WebResourceResponseReceived += lambda s, a: app.on_response(self, a)
@@ -169,6 +171,8 @@ class App:
         self.tab_ids = (f'b{n}' for n in itertools.count())
         self.slot = {}                # where the page wants the browser (device pixels)
         self.env = None               # one WebView2 environment for the interface and every tab
+        self.env_error = None         # why the browser could not start
+        self.pending_tabs = []        # tabs asked for before the browser was ready: (url, activate)
         self.timers = set()           # keep task-wait timers alive
         self.ui_core = None           # CoreWebView2 of the interface page
         self.ui_ready = False         # the page said 'ready': messages can go out
@@ -228,14 +232,20 @@ class App:
 
         def ready():
             if task.IsFaulted:
+                self.env_error = str(task.Exception)
                 self.browser_missing(task.Exception)
                 return
             self.env = task.Result
             self.ui.EnsureCoreWebView2Async(self.env)
-            urls = [u for u in self.settings.get('tabs') or [self.settings.get('last_url')] if u] or [None]
-            for u in urls:
+            asked, self.pending_tabs = self.pending_tabs, []
+            # the tabs from last time, then what was asked for while starting (that one is shown)
+            urls = [u for u in self.settings.get('tabs') or [self.settings.get('last_url')] if u]
+            for u in urls or ([] if asked else [None]):
                 self.new_tab(u, activate=False)
-            self.activate(next(iter(self.browsers)))
+            for u, activate in asked:
+                self.new_tab(u, activate=activate)
+            if self.active is None and self.browsers:
+                self.activate(next(iter(self.browsers)))
 
         self.when_done([task], ready)
 
@@ -368,6 +378,11 @@ class App:
     # ---- browser tabs -------------------------------------------------------------------------------
     def new_tab(self, url=None, new_window=None, activate=True):
         if self.env is None:
+            if self.env_error:
+                self.status(f'ブラウザを使えません: {self.env_error}')
+            elif new_window is None:  # opened as soon as the browser is ready
+                self.pending_tabs.append((url, activate))
+                self.status('ブラウザを準備しています…（準備ができたら開きます）')
             return None
         tab = BrowserTab(self, next(self.tab_ids), normalized(url) if url else None, new_window)
         self.browsers[tab.id] = tab
@@ -399,6 +414,8 @@ class App:
         self.active = tid
         self.place_browser()
         self.send_tabs()
+        if self.tab.source.startswith('http'):
+            self.send('pageUrl', url=self.tab.source)
 
     def send_tabs(self):
         self.send('browserTabs', active=self.active,
@@ -407,6 +424,8 @@ class App:
 
     def tab_changed(self, tab):
         self.send_tabs()
+        if tab.id == self.active and tab.source.startswith('http'):
+            self.send('pageUrl', url=tab.source)  # the console's URL follows the page shown
 
     def on_navigation(self, tab, e):
         if not e.IsRedirected:  # a new page: what the previous one loaded no longer counts
@@ -468,11 +487,11 @@ class App:
             self.log(f'開けませんでした: {url} ({e})')
 
     def open_in_browser(self, url):
-        """In a new tab (the open ones stay as they are)."""
+        """In a new tab (the open ones stay as they are). Without a URL: a blank tab to type into."""
         url = normalized(url)
-        if url:
-            self.new_tab(url)
-            self.send('tab', name='browser')
+        self.log(f'ブラウザで開きます: {url}' if url else 'ブラウザで新しいタブを開きます')
+        self.new_tab(url or None)
+        self.send('tab', name='browser')
 
     def clipboard_url(self):
         try:

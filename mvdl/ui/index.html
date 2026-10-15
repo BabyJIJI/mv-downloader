@@ -469,6 +469,7 @@ const handlers = {
   status(m) { $('#status').textContent = m.text; },
   toast(m) { toast(m.text); },
   url(m) { url.value = m.url; },
+  pageUrl(m) { if (document.activeElement !== url) url.value = m.url; },
   outdir(m) { $('#outdir').value = m.value; },
   tab(m) { showTab(m.name); },
   found(m) {
