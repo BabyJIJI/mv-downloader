@@ -28,6 +28,7 @@ import mvdl.probe  # noqa: E402
 
 mvdl.probe.find_tool = lambda name: None  # placeholder bytes below: judge by Content-Type
 from mvdl import app as appmod  # noqa: E402
+from mvdl.finder import Candidate  # noqa: E402
 
 VIDEO = b'\x00\x00\x00\x18ftypmp42' + b'\x00' * 100_000
 SLOW = b'\x00\x00\x00\x18ftypmp42' + bytes(range(256)) * 1200  # sent in small pieces, with pauses
@@ -152,7 +153,7 @@ def drive(app):
          lambda: len(app.browsers) == 2 and app.active == tabs['js'] and app.web.Visible),
         ('ブラウザのページから探す', lambda: app.handle({'cmd': 'findPage'}),
          lambda: not app.searching and found() == [base + '/media/js.mp4']),
-        ('一時停止', lambda: app.add_jobs([appmod.Candidate(base + '/media/slow.mp4', 'Slow', 'mp4', 'ページ内',
+        ('一時停止', lambda: app.add_jobs([Candidate(base + '/media/slow.mp4', 'Slow', 'mp4', 'ページ内',
                                                            {'Referer': base + '/video.html'})]),
          lambda: getattr(job('Slow'), 'state', None) == appmod.RUNNING and (job('Slow').progress or 0) > 0.2
          and 'ダウンロード中 1' in app.form.Text and not titles.append(app.form.Text)
@@ -161,7 +162,7 @@ def drive(app):
         ('再開', lambda: app.handle({'cmd': 'resume', 'ids': [job('Slow').id]}),
          lambda: job('Slow').state == appmod.DONE),
         ('中止（途中のファイルを削除）',
-         lambda: app.add_jobs([appmod.Candidate(base + '/media/slow.mp4?2', 'Slow2', 'mp4', 'ページ内', {})]),
+         lambda: app.add_jobs([Candidate(base + '/media/slow.mp4?2', 'Slow2', 'mp4', 'ページ内', {})]),
          lambda: getattr(job('Slow2'), 'state', None) == appmod.RUNNING and (job('Slow2').progress or 0) > 0.2
          and any(f.startswith('Slow2') for f in os.listdir(outdir))
          and not app.handle({'cmd': 'cancel', 'ids': [job('Slow2').id]})),
