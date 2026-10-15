@@ -1,53 +1,71 @@
 # mv-downloader（動画ダウンローダー）
 
-Web ページに埋め込まれた動画を保存する Windows 用の GUI ツール。
+Web ページに埋め込まれた動画を保存する Windows 用の GUI ツール。ブラウザを内蔵しているので、Cloudflare の確認やログインが必要なページは、自分で操作してから動画を探せる。
 
-1. ページの URL を貼り付けて「動画を探す」
-2. 見つかった動画を一覧から選ぶ（複数選択可）。一覧には種類・解像度・長さ・ファイルサイズが出る
-3. 画質と保存先を選んで「ダウンロードに追加」。下のダウンロード一覧に積まれ、順に保存される
+## 画面
 
-ダウンロード中も、別のページを探して追加できる。同時に保存する数は 1〜4 で選べる（初期値 2）。ダウンロード一覧で選んだものの中止・再試行、完了・失敗したものの消去ができる。
+左が操作コンソール、右がタブ。
 
-一覧に出すのは映像の入ったものだけ。ページ内やブラウザの通信で見つけた URL は、ffprobe（無ければ Content-Type）で中身を確かめ、音声だけ・画像・字幕・HTML などは除く。HLS は親のプレイリストだけを出し、その中の画質別・音声のプレイリストはまとめる。HLS のサイズは「ビットレート × 長さ」の見積もり（「約」が付く）。
+| 左：操作コンソール | 右：タブ |
+|---|---|
+| ページの URL、「URL から探す」「ブラウザで開く」「ブラウザのページから探す」 | 見つかった動画（種類・解像度・長さ・サイズ・見つけ方） |
+| 保存先、画質、「選んだ動画をダウンロードに追加」 | ブラウザ（戻る・進む・再読み込み・アドレスバー・「このページから探す」） |
+| ダウンロード一覧の操作（同時に保存する数、中止、再試行、完了・失敗を消す、保存先を開く） | ダウンロード一覧（状態・進み具合） |
+| | ログ |
 
-## 動画の見つけ方
+## 使い方
 
-上から順に試し、見つかった時点で止める。
+### URL から探す（これまでどおり）
 
-| 順番 | 方法 | 向いているページ |
-|---|---|---|
-| 1 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | YouTube・Vimeo・X など、yt-dlp が対応する約 1,800 サイト。HTML に `<video>` があるページ |
-| 2 | ページの HTML を読む | `<video>` / `<source>`、`og:video`、スクリプト内の `.mp4` `.m3u8` `.mpd` の URL、YouTube などの埋め込み iframe |
-| 3 | Chrome で再生して通信を見る | JavaScript でプレーヤーを読み込むページ、クリックしないと動画が出ないページ。ヘッドレスの Chrome でページを開き、動画をミュート再生し、再生ボタンやプレーヤーを本物のマウス操作でクリックして、動画や HLS/DASH マニフェストの URL を拾う。別サイトのプレーヤー（iframe）、クリックで開いた新しいタブ、Worker の通信も見る。Cookie と Referer も引き継ぐ |
+1. URL を入れて「URL から探す」
+2. 「見つかった動画」から選び（複数可）、画質と保存先を選んで「選んだ動画をダウンロードに追加」
+3. 「ダウンロード一覧」タブで進み具合を見る。保存中も、別のページを探して追加できる
 
-3 は画面の「見つからないときは Chrome で再生して探す」で切り替えられる（20 秒ほどかかる）。
+探し方は、まず [yt-dlp](https://github.com/yt-dlp/yt-dlp)（YouTube・Vimeo など約 1,800 サイトに対応）、見つからなければページの HTML（`<video>`、`og:video`、スクリプト内の `.mp4` `.m3u8` `.mpd`、YouTube などの埋め込み）。
 
-### Cloudflare の確認画面で止められるとき・ログインが必要なとき
+### ブラウザで探す（Cloudflare・ログイン・クリックしないと出ない動画）
 
-「ブラウザで開いて探す」を押すと、Chrome が画面に出る。確認（「人間であることを確認します」など）やログインを自分で済ませ、動画を再生して「完了」を押す（またはブラウザを閉じる）と、その間に読み込まれた動画が一覧に出る。ダウンロードには、そのブラウザが実際に送った Cookie と User-Agent を使う。
+1. 「ブラウザで開く」（または「ブラウザ」タブのアドレスバー）でページを開く
+2. 確認画面やログインを済ませ、動画を再生する
+3. 「ブラウザのページから探す」を押す
 
-「動画を探す」で Cloudflare に止められたときは、ブラウザを開くか聞かれる。
+次の 3 つを合わせて一覧に出す。
 
-ブラウザは Google Chrome を使う（入っていなければ Edge）。このブラウザのプロファイルは `%LOCALAPPDATA%\mvdl\browser-chrome` に残るので、確認やログインは次回以降も引き継がれる（普段使っている Chrome とは別）。
+- そのページでブラウザが読み込んだ動画（ファイルや HLS/DASH のマニフェスト）。別サイトのプレーヤー（iframe）の分も含む
+- 押した時点のページの中身（JavaScript で書き換わった後の HTML）
+- yt-dlp が対応しているサイトなら yt-dlp の結果（ブラウザの Cookie を使う）
+
+ダウンロードには、ブラウザが実際に送った Cookie・User-Agent・Referer を使う。
+
+ブラウザは閲覧中に何も操作しない（スクリプトの注入もクリックもしない）。読み込んだものの記録を取るだけで、ページを調べるのはボタンを押したときだけ。
+
+「URL から探す」が Cloudflare に止められたときは、ブラウザで開くか聞かれる。
+
+ブラウザの Cookie・ログイン・通った確認は `%LOCALAPPDATA%\mvdl\webview2` に残り、次回も使える（普段のブラウザとは別）。
+
+### 一覧に出るもの
+
+映像の入ったものだけ。見つけた URL は ffprobe（無ければ Content-Type）で中身を確かめ、音声だけ・画像・字幕・HTML などは除く。HLS は親のプレイリストだけを出し、その中の画質別・音声のプレイリストはまとめる。HLS のサイズは「ビットレート × 長さ」の見積もり（「約」が付く）。
 
 ## 使い方（配布版）
 
-[Releases](../../releases) または Actions の成果物から `mvdl-win64.zip` を取り、展開して `mvdl.exe` を実行する。インストールは不要。
+[Releases](../../releases) から取る。インストールは不要。
 
-| ファイル | 役割 |
+| ファイル | 中身 |
 |---|---|
-| `mvdl.exe` | 本体 |
-| `ffmpeg.exe` / `ffprobe.exe` | 映像と音声の結合、HLS/DASH の結合。無くても動くが、映像と音声が一体のファイルしか選べず、画質が下がることがある |
-| `deno.exe` | YouTube の署名の解読に yt-dlp が使う |
+| `mvdl-win64.zip` | `mvdl.exe` ＋ `ffmpeg.exe` / `ffprobe.exe`（映像と音声の結合、HLS/DASH）＋ `deno.exe`（YouTube に必要）。展開して `mvdl.exe` を起動 |
+| `mvdl.exe` | 本体だけ。ffmpeg が無いので、映像と音声が一体のファイルしか選べず、画質が下がることがある |
 
-設定（保存先・画質）は `%APPDATA%\mvdl\settings.json` に保存される。
+ブラウザには Windows の **Microsoft Edge WebView2 ランタイム**を使う（Windows 10/11 には通常入っている）。無いときは起動時に案内が出る。
+
+設定（保存先・画質・同時に保存する数・最後に開いたページ）は `%APPDATA%\mvdl\settings.json`。
 
 ## ビルド
 
-GitHub に push すると Actions（`.github/workflows/build.yml`）がテストし、Windows で exe を作る。`v*` のタグを push すると Release に zip を載せる。
+GitHub に push すると Actions（`.github/workflows/build.yml`）が、テスト（Linux）→ 実際のウィンドウでの動作確認（Windows、WebView2）→ exe のビルド → exe の起動確認、を行う。`v*` のタグを push すると Release に zip と exe を載せる。
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.5.0 && git push origin v0.5.0
 ```
 
 手元の Windows で作るとき（Python 3.11 以上が必要。`winget install Python.Python.3.12`）：
@@ -57,28 +75,31 @@ powershell -ExecutionPolicy Bypass -File build.ps1          # dist\mvdl-win64.zi
 powershell -ExecutionPolicy Bypass -File build.ps1 -NoTools # exe だけ
 ```
 
-開発中はそのまま実行できる：
+開発中：
 
-```bash
+```powershell
 pip install -r requirements.txt
-python -m mvdl            # GUI
-python -m pytest tests    # テスト（ローカルの HTTP サーバーで確認）
+python tools/fetch_webview2.py   # WebView2 SDK の DLL を mvdl/lib に取得
+python -m mvdl                   # 起動
+python -m pytest tests           # テスト（ローカルの HTTP サーバーで確認。Linux でも動く）
+python tests/smoke_app.py        # 実際のウィンドウでの確認（Windows）
 ```
 
 ## 構成
 
 | パス | 役割 |
 |---|---|
-| `mvdl/gui.py` | 画面（tkinter） |
-| `mvdl/finder.py` | 動画の検索（yt-dlp、HTML の解析） |
+| `mvdl/app.py` | 画面（WinForms ＋ WebView2、pythonnet 経由） |
+| `mvdl/capture.py` | ブラウザが読み込んだ動画の記録（送った Cookie などのヘッダーも） |
+| `mvdl/finder.py` | 動画の検索（yt-dlp、HTML の解析、ブラウザのページ） |
 | `mvdl/probe.py` | 見つけた URL が動画かを確かめ、解像度・長さ・サイズを調べる |
-| `mvdl/browser.py` | Chrome を DevTools Protocol で操作し、通信から動画の URL を拾う（Playwright 不要） |
 | `mvdl/downloader.py` | yt-dlp でのダウンロード、画質の選択、進捗 |
-| `mvdl/tools.py` | exe の隣の ffmpeg / deno、Chrome の場所 |
+| `mvdl/tools.py` | exe の隣の ffmpeg / deno |
+| `tools/fetch_webview2.py` | WebView2 SDK（NuGet）の DLL の取得 |
 
 ## 注意
 
 - 保存してよい動画（自分の動画、利用規約や権利者が許可しているもの）にだけ使うこと。
 - DRM（Widevine など）で保護された動画（Netflix、Amazon Prime Video など）は保存できない。保護を外す機能は付けない。
-- Cloudflare を通った後でも、動画ファイル自体の配信にも確認がかかっているサイトでは、ダウンロードが 403 になることがある。
+- 動画ファイルの配信自体にも Cloudflare の確認がかかっているサイトでは、ブラウザで見つけた動画でもダウンロードが 403 になることがある。
 - サイトの仕様変更で yt-dlp が取れなくなったら、yt-dlp を更新してビルドし直す（Actions を再実行すれば最新の yt-dlp で作られる）。
