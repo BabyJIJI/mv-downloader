@@ -7,9 +7,9 @@ import threading
 
 import pytest
 
-from mvdl.browser import is_media
+from mvdl.capture import Capture, is_media
 from mvdl.downloader import download
-from mvdl.finder import Blocked, Candidate, find_in_html, find_videos, find_with_ytdlp, kind_of
+from mvdl.finder import Blocked, Candidate, find_in_html, find_in_page, find_videos, find_with_ytdlp, kind_of
 
 
 def _make_media():
@@ -196,7 +196,7 @@ def test_fmt_size():
 
 
 def test_nothing_found(server):
-    assert find_videos(server + '/empty.html', print, use_browser=False) == []
+    assert find_videos(server + '/empty.html', print) == []
 
 
 def test_ytdlp_generic_finds_video_tag(server, check_mode):
@@ -224,7 +224,7 @@ def test_download_direct(server, tmp_path):
 
 def test_cloudflare_block(server):
     with pytest.raises(Blocked):
-        find_videos(server + '/cf.html', print, use_browser=True)
+        find_videos(server + '/cf.html', print)
 
 
 def test_download_sends_browser_headers(server, tmp_path):
@@ -238,32 +238,30 @@ def test_download_sends_browser_headers(server, tmp_path):
     assert 'cf_clearance=abc' in got.get('Cookie', '')
 
 
-def test_visible_browser_falls_back_when_profile_busy(monkeypatch, tmp_path):
-    """Profile still used by a leftover browser: end it and retry, then fall back to a temporary profile."""
-    import mvdl.browser as b
-    monkeypatch.setattr(b, 'profile_dir', lambda exe: str(tmp_path / 'keep'))
-    killed, tried = [], []
-    monkeypatch.setattr(b, '_kill_profile_browsers', killed.append)
-
-    def launch(exe, profile, visible):
-        tried.append(profile)
-        if len(tried) < 3:
-            raise b.LaunchError('busy', b.EXIT_HANDED_OFF)
-        return 'proc', 1234
-
-    monkeypatch.setattr(b, '_launch', launch)
-    proc, port, profile, temp = b._start('edge', True, print)
-    assert killed == [str(tmp_path / 'keep')]
-    assert tried[:2] == [str(tmp_path / 'keep')] * 2 and tried[2] == profile != tried[0]
-    assert (proc, port, temp) == ('proc', 1234, True)
-    os.rmdir(profile)
+def test_capture_keeps_media_with_sent_headers():
+    cap = Capture()
+    assert cap.add('https://cdn/x/master.m3u8', 'application/vnd.apple.mpegurl',
+                   {'Cookie': 'cf_clearance=1', 'User-Agent': 'UA', 'Referer': 'https://site/watch', 'Accept': '*/*'})
+    assert not cap.add('https://cdn/x/seg1.ts', 'video/mp2t', {})          # segment
+    assert not cap.add('https://site/app.js', 'application/javascript', {})
+    assert not cap.add('https://cdn/x/master.m3u8', 'application/vnd.apple.mpegurl', {})  # seen already
+    assert cap.add('https://cdn/v.mp4', 'video/mp4', {})
+    [hls, mp4] = cap.candidates('https://site/watch', 'Title', 'BrowserUA', {'https://cdn/v.mp4': 'a=b'}.get)
+    assert (hls.kind, hls.source, hls.title) == ('HLS', 'ブラウザ', 'Title')
+    assert hls.headers == {'Referer': 'https://site/watch', 'User-Agent': 'UA', 'Cookie': 'cf_clearance=1'}
+    assert mp4.headers == {'Referer': 'https://site/watch', 'User-Agent': 'BrowserUA', 'Cookie': 'a=b'}
+    cap.reset()
+    assert len(cap) == 0
 
 
-def test_headless_browser_uses_fresh_profile(monkeypatch):
-    import mvdl.browser as b
-    monkeypatch.setattr(b, '_launch', lambda exe, profile, visible: ('proc', 1))
-    _, _, p1, t1 = b._start('edge', False, print)
-    _, _, p2, t2 = b._start('edge', False, print)
-    assert p1 != p2 and t1 and t2
-    os.rmdir(p1)
-    os.rmdir(p2)
+def test_find_in_page_merges_capture_and_dom(server, check_mode):
+    """The browser's DOM (after JavaScript) and its captured requests, checked and without duplicates."""
+    dom = f'<html><title>DOM</title><video src="{server}/media/clip.mp4"></video><audio src="/media/voice.mp4"></audio>'
+    cap = Capture()
+    cap.add(server + '/media/master.m3u8', 'application/vnd.apple.mpegurl', {'Cookie': 'k=v'})
+    cap.add(server + '/media/clip.mp4', 'video/mp4', {})
+    cap.add(server + '/media/fake.mp4', 'video/mp4', {})  # really HTML: dropped by the check
+    found = find_in_page(server + '/page', 'Page title', dom, cap.candidates(server + '/page', 'Page title', 'UA'),
+                         {'User-Agent': 'UA'}, print)
+    assert sorted(c.url for c in found) == [server + '/media/clip.mp4', server + '/media/master.m3u8']
+    assert found[0].kind == 'HLS' and found[0].headers['Cookie'] == 'k=v'

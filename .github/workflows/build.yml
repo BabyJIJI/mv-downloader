@@ -30,11 +30,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: GUI smoke test
+      - name: App smoke test (real window, WebView2)
         run: |
           pip install -r requirements.txt
-          python tests/smoke_gui.py
-          python tests/smoke_browser.py
+          python tools/fetch_webview2.py
+          python tests/smoke_app.py
       - run: powershell -ExecutionPolicy Bypass -File build.ps1
       - uses: actions/upload-artifact@v4
         with:

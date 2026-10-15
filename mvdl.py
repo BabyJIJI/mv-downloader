@@ -1,4 +1,4 @@
 """PyInstaller entry point (and `python mvdl.py`)."""
-from mvdl.gui import main
+from mvdl.app import main
 
 main()

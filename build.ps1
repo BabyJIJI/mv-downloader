@@ -13,8 +13,12 @@ $py = '.venv-build\Scripts\python.exe'
 & $py -m pip install --upgrade -r requirements.txt pyinstaller
 if ($LASTEXITCODE) { throw 'pip install failed' }
 
+& $py tools/fetch_webview2.py  # WebView2 SDK assemblies for the built-in browser
+if ($LASTEXITCODE) { throw 'fetch_webview2 failed' }
+
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name mvdl `
-    --collect-all yt_dlp_ejs mvdl.py
+    --collect-all yt_dlp_ejs --collect-all pythonnet --collect-all clr_loader `
+    --add-data 'mvdl/lib;mvdl/lib' mvdl.py
 if ($LASTEXITCODE) { throw 'PyInstaller failed' }
 
 if (-not $NoTools) {

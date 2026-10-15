@@ -1,9 +1,9 @@
 """Find the videos on a page.
 
-1. yt-dlp (dedicated extractors for ~1800 sites, plus its generic one)
-2. our own scan of the HTML: <video>/<source>, og:video, media URLs inside scripts, and iframes
-   that yt-dlp has an extractor for (YouTube / Vimeo embeds, ...)
-3. (browser.py) open the page in headless Chrome, play it, and watch the network
+- yt-dlp (dedicated extractors for ~1800 sites, plus its generic one)
+- our own scan of the HTML: <video>/<source>, og:video, media URLs inside scripts, and iframes
+  that yt-dlp has an extractor for (YouTube / Vimeo embeds, ...)
+- (capture.py) the media requests the built-in browser made while the user watched the page
 """
 import html.parser
 import re
@@ -264,6 +264,7 @@ def has_site_extractor(url):
 
 
 def find_in_html(url, log):
+    """Fetch the page ourselves and look through its HTML."""
     try:
         text, final = fetch_page(url, log)
     except Exception as e:  # noqa: BLE001 - any network error means "nothing found here"
@@ -271,49 +272,76 @@ def find_in_html(url, log):
         if is_cloudflare_block(e):
             raise Blocked() from e
         return []
+    return _checked(scan_html(text, final, log, {'Referer': final}), log)
+
+
+def scan_html(text, page_url, log, headers):
+    """Media URLs in an HTML document (<video>, og:video, URLs inside scripts) and the embedded players
+    yt-dlp knows (YouTube / Vimeo iframes, ...). Not checked yet: see _checked()."""
     p = _PageParser()
     try:
         p.feed(text)
     except Exception:  # noqa: BLE001 - broken HTML; the regex scan below still runs
         pass
-    title = p.title or final
+    title = p.title or page_url
     found = [*p.media, *MEDIA_URL_RE.findall(text.replace('\\/', '/'))]
-
     seen, out = set(), []
-    referer = {'Referer': final}
     for raw in found:
-        u = urllib.parse.urljoin(final, raw.strip())
+        u = urllib.parse.urljoin(page_url, raw.strip())
         if not u.startswith('http') or u in seen or has_site_extractor(u):
             continue
         seen.add(u)
-        out.append(Candidate(u, title, kind_of(u), 'ページ内', referer))
+        out.append(Candidate(u, title, kind_of(u), 'ページ内', dict(headers)))
     for raw in p.iframes:
-        u = urllib.parse.urljoin(final, raw.strip())
+        u = urllib.parse.urljoin(page_url, raw.strip())
         if u in seen or not u.startswith('http') or not has_site_extractor(u):
             continue
         seen.add(u)
         log(f'埋め込みプレーヤーを調べています: {u}')
-        out += find_with_ytdlp(u, log, referer)
-    from .probe import keep_videos
-    out = [c for c in out if c.source == 'yt-dlp'] + keep_videos([c for c in out if c.source != 'yt-dlp'], log)
-    # manifests (whole stream) before single files; master playlists before variants
-    out.sort(key=lambda c: (c.kind not in ('HLS', 'DASH'), 'master' not in c.url.lower()))
+        out += find_with_ytdlp(u, log, {'Referer': page_url})
     return out
 
 
-def find_videos(url, log, use_browser=True, stop=None):
-    """Try each method in turn and return the first non-empty result.
+def _checked(cands, log):
+    """Keep the real videos (yt-dlp results are already checked), without duplicates, best first."""
+    from .probe import keep_videos
+    seen = set()
+    cands = [c for c in cands if not (c.url in seen or seen.add(c.url))]
+    out = [c for c in cands if c.source == 'yt-dlp'] + keep_videos([c for c in cands if c.source != 'yt-dlp'], log)
+    # site results first, then manifests (whole stream) before single files, master playlists first
+    out.sort(key=lambda c: (c.source != 'yt-dlp', c.kind not in ('HLS', 'DASH'), 'master' not in c.url.lower()))
+    return out
 
-    Raises Blocked when Cloudflare's bot check stops us (a headless browser would be stopped too).
+
+def find_in_page(page_url, title, html, captured, headers, log):
+    """「このページの動画を探す」 in the built-in browser.
+
+    captured: Candidates for the media the browser loaded (capture.Capture.candidates()).
+    html:     the page's DOM as it is now (after JavaScript).
+    headers:  Cookie / User-Agent of the browser, for yt-dlp and the checks.
     """
+    out = []
+    if has_site_extractor(page_url):
+        log('yt-dlp で調べています…')
+        try:
+            out += find_with_ytdlp(page_url, log, headers)
+        except Blocked:
+            log('yt-dlp はサイトの確認画面で止められました（ブラウザで読み込んだ動画から探します）')
+    log(f'ページ内と、ブラウザが読み込んだ動画（{len(captured)} 件）を調べています…')
+    out += captured
+    if html:
+        out += scan_html(html, page_url, log, headers | {'Referer': page_url})
+    for c in out:
+        if c.title == c.url or not c.title:
+            c.title = title or page_url
+    return _checked(out, log)
+
+
+def find_videos(url, log):
+    """Without the browser: yt-dlp, then our own look at the HTML. Raises Blocked on a bot check."""
     log('yt-dlp で調べています…')
     found = find_with_ytdlp(url, log)
     if found:
         return found
     log('ページの HTML から探しています…')
-    found = find_in_html(url, log)
-    if found or not use_browser:
-        return found
-    from .browser import sniff
-    log('ブラウザで再生して、通信から探しています…')
-    return sniff(url, log, stop=stop)
+    return find_in_html(url, log)

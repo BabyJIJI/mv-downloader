@@ -5,3 +5,4 @@ dist/
 *.spec
 *.zip
 .pytest_cache/
+mvdl/lib/
