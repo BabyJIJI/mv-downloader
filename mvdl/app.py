@@ -16,7 +16,6 @@ import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 
 import clr  # pythonnet
 
@@ -24,7 +23,9 @@ from . import __version__
 from . import probe
 from .capture import Capture, is_media
 from .downloader import QUALITIES, Cancelled, download
-from .finder import Blocked, Candidate, find_in_page, find_videos, fmt_duration, fmt_size, kind_of
+from .finder import Blocked, find_in_page, find_videos, fmt_duration, fmt_size, kind_of
+from .jobs import (CANCELLED, DONE, FAILED, PAUSED, RESTORED, RUNNING, UNFINISHED, WAITING, Job, load_queue,
+                   remove_partials, save_queue)
 from .tools import find_tool
 
 clr.AddReference('System.Windows.Forms')
@@ -47,7 +48,7 @@ DATA = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), '
 SETTINGS = os.path.join(os.environ.get('APPDATA') or DATA, 'mvdl', 'settings.json')
 WEBVIEW2_RUNTIME = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
 PARALLEL = tuple(str(n) for n in range(1, 11))
-WAITING, RUNNING, PAUSED, DONE, FAILED, CANCELLED = '待機中', 'ダウンロード中', '一時停止', '完了', '失敗', '中止'
+QUEUE = os.path.join(os.path.dirname(SETTINGS), 'queue.json')  # the download queue, kept between runs
 
 
 def load_settings():
@@ -87,20 +88,6 @@ def dark_mode():
             return winreg.QueryValueEx(k, 'AppsUseLightTheme')[0] == 0
     except OSError:
         return False
-
-
-@dataclass
-class Job:
-    id: str
-    cand: Candidate
-    outdir: str
-    quality: str
-    state: str = WAITING
-    text: str = ''
-    progress: float | None = None
-    stop: threading.Event = field(default_factory=threading.Event)
-    pausing: bool = False         # the stop is a pause: keep the partial file and resume later
-    files: list = field(default_factory=list)
 
 
 class BrowserTab:
@@ -164,8 +151,10 @@ class App:
         self.checker = ThreadPoolExecutor(2)  # checks of what the browser loaded: two at a time
         self.searching = False
         self.cands = []
-        self.jobs = {}                # id -> Job, in the order they were added
-        self.job_ids = (f'j{n}' for n in itertools.count())
+        restored = load_queue(QUEUE)  # the queue from last time; unfinished ones come back paused
+        self.jobs = {j.id: j for j in restored}  # id -> Job, in the order they were added
+        first = max((int(j.id[1:]) for j in restored if j.id[1:].isdigit()), default=-1) + 1
+        self.job_ids = (f'j{n}' for n in itertools.count(first))
         self.browsers = {}            # tab id -> BrowserTab, in the order they were opened
         self.active = None            # id of the tab shown
         self.tab_ids = (f'b{n}' for n in itertools.count())
@@ -316,6 +305,12 @@ class App:
                 self.ui_core.PostWebMessageAsJson(msg)
             self.outbox.clear()
             self.send_tabs()
+            for job in self.jobs.values():
+                self.send_job(job)
+            self.send_stats()
+            resumable = sum(j.text == RESTORED for j in self.jobs.values())
+            if resumable:
+                self.send('toast', text=f'前回の続きが {resumable} 件あります（ダウンロード一覧で「再開」）')
         elif cmd == 'findUrl':
             self.find_url(m.get('url'))
         elif cmd == 'openInBrowser':
@@ -654,6 +649,7 @@ class App:
         job.state, job.text, job.progress = state, text or state, progress
         self.send_job(job)
         self.send_stats()
+        self.save_jobs()
 
     def send_stats(self):
         states = [j.state for j in self.jobs.values()]
@@ -694,11 +690,13 @@ class App:
             self.q.put(('job', (job.id, frac, (f'{frac * 100:.0f}%  ' if frac is not None else '') + text)))
 
         try:
-            job.files = download(job.cand, job.outdir, job.quality, log, progress, job.stop)
+            job.files = download(job.cand, job.outdir, job.quality, log, progress, job.stop,
+                                 lambda name: name in job.partials or job.partials.append(name))
         except Cancelled:
             if job.pausing:  # keep the progress: yt-dlp continues the .part file on resume
                 self.q.put(('job-end', (job.id, PAUSED, f'{PAUSED}（{job.text}）' if job.text else PAUSED)))
             else:
+                self.drop_partials(job, log)
                 self.q.put(('job-end', (job.id, CANCELLED, None)))
             return
         except Exception as e:  # noqa: BLE001 - shown in the list and the log
@@ -708,7 +706,14 @@ class App:
             return
         for p in job.files:
             self.q.put(('log', f'保存しました: {p}'))
+        job.partials = []
         self.q.put(('job-end', (job.id, DONE, None)))
+
+    def drop_partials(self, job, log=None):
+        removed = remove_partials(job.partials)
+        job.partials = []
+        if removed:
+            (log or self.log)(f'途中のファイルを削除しました: {", ".join(os.path.basename(p) for p in removed)}')
 
     def enqueue_captured(self, ids):
         """As the browser loaded them, with the cookies it sent or holds. ids: "<tab id>|<url>"."""
@@ -751,15 +756,17 @@ class App:
             added += 1
         if added:
             self.send('toast', text=f'{added} 件をダウンロード一覧に追加しました')
+            self.save_jobs()
         self.send_stats()
         self.save()
         self.start_jobs()
 
     def cancel_jobs(self, ids):
-        ids = [i for i in ids if i in self.jobs] or [j.id for j in self.jobs.values()
-                                                     if j.state in (WAITING, RUNNING, PAUSED)]
+        """Stop and delete the partial files (the page asked for confirmation first)."""
+        ids = [i for i in ids if i in self.jobs] or [j.id for j in self.jobs.values() if j.state in UNFINISHED]
         for job in (self.jobs[i] for i in ids):
-            if job.state in (WAITING, PAUSED):
+            if job.state in (WAITING, PAUSED, FAILED):
+                self.drop_partials(job)
                 self.set_job_state(job, CANCELLED)
             elif job.state == RUNNING:
                 job.pausing = False
@@ -795,11 +802,18 @@ class App:
         self.start_jobs()
 
     def clear_jobs(self):
+        """Take finished ones off the list; a failed one's partial files go too (confirmed by the page)."""
         gone = [j.id for j in self.jobs.values() if j.state in (DONE, FAILED, CANCELLED)]
         for i in gone:
+            if self.jobs[i].state != DONE:
+                self.drop_partials(self.jobs[i])
             del self.jobs[i]
         self.send('jobsRemoved', ids=gone)
         self.send_stats()
+        self.save_jobs()
+
+    def save_jobs(self):
+        save_queue(QUEUE, self.jobs.values())
 
     def browse(self):
         dlg = FolderBrowserDialog()
@@ -829,13 +843,18 @@ class App:
                        'tabs': tabs if self.browsers else self.settings.get('tabs', [])})
 
     def on_closing(self, sender, e):
-        left = sum(j.state in (WAITING, RUNNING, PAUSED) for j in self.jobs.values())
-        if left and MessageBox.Show(f'ダウンロードが {left} 件残っています（一時停止を含む）。中止して終了しますか？', APP,
-                                    MessageBoxButtons.YesNo) != DialogResult.Yes:
+        running = sum(j.state == RUNNING for j in self.jobs.values())
+        if running and MessageBox.Show(f'ダウンロード中のものが {running} 件あります。\n'
+                                       '一時停止して終了し、次に起動したときに「再開」で続きから保存できます。\n\n終了しますか？',
+                                       APP, MessageBoxButtons.YesNo) != DialogResult.Yes:
             e.Cancel = True
             return
+        # unfinished downloads keep their partial files and come back paused next time
         for job in self.jobs.values():
-            job.stop.set()
+            if job.state == RUNNING:
+                job.pausing = True
+                job.stop.set()
+        self.save_jobs()
         self.save()
 
 

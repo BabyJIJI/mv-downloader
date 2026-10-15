@@ -28,8 +28,9 @@ class Cancelled(Exception):
     pass
 
 
-def download(cand: Candidate, outdir, quality, log, progress=None, stop=None):
-    """progress(fraction or None, text). Returns the saved file paths."""
+def download(cand: Candidate, outdir, quality, log, progress=None, stop=None, on_file=None):
+    """progress(fraction or None, text); on_file(name) for each file yt-dlp writes (its partials are
+    name.part etc.). Returns the saved file paths."""
     quality = quality if quality in QUALITIES else '最高画質'
     fmt = QUALITIES[quality]
     if not find_tool('ffmpeg'):
@@ -44,6 +45,8 @@ def download(cand: Candidate, outdir, quality, log, progress=None, stop=None):
     files = []
 
     def hook(d):
+        if on_file and d.get('filename'):
+            on_file(d['filename'])
         if stop is not None and stop.is_set():
             raise Cancelled()
         if not progress:

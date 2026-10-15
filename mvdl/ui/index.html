@@ -414,8 +414,16 @@ function enqueue(from) {
   send('enqueue', {from, ids});
 }
 $('#enqueue').onclick = () => enqueue(tab === 'captured' ? 'captured' : 'found');
-document.querySelectorAll('[data-queue-actions] [data-act]').forEach(b =>
-  b.onclick = () => send(b.dataset.act, b.dataset.act === 'clear' ? {} : {ids: queue.selected()}));
+const CONFIRM = {  // acts that delete files ask first
+  cancel: ids => ['ダウンロードを中止しますか？',
+                  `${ids.length ? `選んだ ${ids.length} 件` : '進行中・待機中・一時停止中のすべて'}を中止し、途中まで保存したファイルを削除します。`],
+  clear: () => ['完了・中止・失敗を一覧から消しますか？', '失敗したものは、途中まで保存したファイルも削除します。保存が終わったファイルは消えません。'],
+};
+document.querySelectorAll('[data-queue-actions] [data-act]').forEach(b => b.onclick = () => {
+  const act = b.dataset.act, ids = act === 'clear' ? [] : queue.selected();
+  const go = () => send(act, act === 'clear' ? {} : {ids});
+  if (CONFIRM[act]) ask(...CONFIRM[act](ids), go); else go();
+});
 $('#open-folder').onclick = () => send('openFolder', {id: queue.selected()[0] || null});
 $('#browse').onclick = () => send('browse');
 for (const key of ['outdir', 'quality', 'parallel']) $('#' + key).addEventListener('change', e => send('set', {key, value: e.target.value}));
