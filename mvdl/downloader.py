@@ -4,7 +4,7 @@ import os
 import yt_dlp
 from yt_dlp.utils import sanitize_filename
 
-from .finder import Candidate, Logger
+from .finder import Candidate, Logger, fmt_size
 from .tools import find_tool, ydl_base_opts
 
 QUALITIES = {
@@ -53,9 +53,9 @@ def download(cand: Candidate, outdir, quality, log, progress=None, stop=None):
             frac = done / total if total else None
             if d.get('fragment_count'):
                 frac = (d.get('fragment_index') or 0) / d['fragment_count']
-            text = _size(done) + (f' / {_size(total)}' if total else '')
+            text = fmt_size(done) + (f' / {fmt_size(total)}' if total else '')
             if d.get('speed'):
-                text += f'  {_size(d["speed"])}/s'
+                text += f'  {fmt_size(d["speed"])}/s'
             if d.get('eta') is not None:
                 text += f'  残り {int(d["eta"])} 秒'
             progress(frac, text)
@@ -93,9 +93,3 @@ def download(cand: Candidate, outdir, quality, log, progress=None, stop=None):
                 files.append(d['filepath'])
     return list(dict.fromkeys(files))
 
-
-def _size(n):
-    for unit in ('B', 'KB', 'MB', 'GB'):
-        if n < 1024 or unit == 'GB':
-            return f'{n:.0f} {unit}' if unit == 'B' else f'{n:.1f} {unit}'
-        n /= 1024

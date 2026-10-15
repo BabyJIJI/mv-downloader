@@ -28,8 +28,11 @@ class Candidate:
     title: str
     kind: str           # site name (yt-dlp extractor), "mp4", "HLS", "DASH", ...
     source: str         # 'yt-dlp' / 'ページ内' / 'ブラウザ'
-    detail: str = ''    # resolution, duration
     headers: dict = field(default_factory=dict)  # Referer / Cookie for direct URLs
+    resolution: str = ''        # "1920×1080", or "720p" when only the height is known
+    duration: float | None = None  # seconds
+    size: int | None = None     # bytes (best quality)
+    size_approx: bool = False   # estimated (bitrate x duration, or the site's estimate)
 
 
 class Logger:
@@ -58,16 +61,44 @@ def kind_of(url):
     return {'m3u8': 'HLS', 'mpd': 'DASH'}.get(ext, ext or '動画')
 
 
-def _detail(info):
-    parts = []
-    if info.get('height'):
-        parts.append(f"{info['height']}p")
-    elif info.get('resolution') and info['resolution'] != 'audio only':
-        parts.append(info['resolution'])
-    if info.get('duration'):
-        d = int(info['duration'])
-        parts.append(f'{d // 3600}:{d // 60 % 60:02}:{d % 60:02}' if d >= 3600 else f'{d // 60}:{d % 60:02}')
-    return ' '.join(parts)
+def fmt_size(n, approx=False):
+    if n is None:
+        return '—'
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if n < 1024 or unit == 'TB':
+            text = f'{n:.0f} {unit}' if unit == 'B' else f'{n:.1f} {unit}'
+            return ('約 ' if approx else '') + text
+        n /= 1024
+
+
+def ytdlp_size(info):
+    """(bytes, approx) of the formats yt-dlp picked, or (None, False) when any part is unknown."""
+    total, approx = 0, False
+    for f in info.get('requested_formats') or [info]:
+        if f.get('filesize'):
+            total += f['filesize']
+        elif f.get('filesize_approx'):
+            total, approx = total + f['filesize_approx'], True
+        else:
+            return None, False
+    return total or None, approx
+
+
+def fmt_resolution(info):
+    w, h = info.get('width'), info.get('height')
+    if w and h:
+        return f'{w}×{h}'
+    if h:
+        return f'{h}p'
+    res = info.get('resolution') or ''
+    return res.replace('x', '×') if res and res != 'audio only' else ''
+
+
+def fmt_duration(sec):
+    if not sec:
+        return '—'
+    d = int(round(sec))
+    return f'{d // 3600}:{d // 60 % 60:02}:{d % 60:02}' if d >= 3600 else f'{d // 60}:{d % 60:02}'
 
 
 def is_cloudflare_block(e):
@@ -104,8 +135,13 @@ def find_with_ytdlp(url, log, headers=None):
         site = kind_of(info.get('url') or url) if info.get('url') else 'ページ'
     entries = info.get('entries')
     if entries is None:
-        return [Candidate(info.get('webpage_url') or url, info.get('title') or url, site, 'yt-dlp',
-                          _detail(info), headers or {})]
+        formats = info.get('formats') or [info]
+        if all(f.get('vcodec') == 'none' for f in formats):
+            log(f'音声だけなので除きました: {info.get("title") or url}')
+            return []
+        size, approx = ytdlp_size(info)
+        return [Candidate(info.get('webpage_url') or url, info.get('title') or url, site, 'yt-dlp', headers or {},
+                          fmt_resolution(info), info.get('duration'), size, approx)]
     out = []
     for e in entries:
         if not e:
@@ -113,7 +149,8 @@ def find_with_ytdlp(url, log, headers=None):
         u = e.get('webpage_url') or e.get('url')
         if not u:
             continue
-        out.append(Candidate(u, e.get('title') or u, e.get('ie_key') or site, 'yt-dlp', _detail(e), headers or {}))
+        out.append(Candidate(u, e.get('title') or u, e.get('ie_key') or site, 'yt-dlp', headers or {},
+                             fmt_resolution(e), e.get('duration')))
     return out
 
 
@@ -126,10 +163,13 @@ class _PageParser(html.parser.HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.media, self.iframes, self.title, self._in_title = [], [], '', False
+        self._in_video = 0  # <source> also appears in <audio> and <picture>
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
-        if tag in ('video', 'source', 'audio'):
+        if tag == 'video':
+            self._in_video += 1
+        if tag == 'video' or (tag == 'source' and self._in_video):
             for k in ('src', 'data-src'):
                 if a.get(k):
                     self.media.append(a[k])
@@ -141,12 +181,15 @@ class _PageParser(html.parser.HTMLParser):
             key = (a.get('property') or a.get('name') or '').lower()
             if key in ('og:video', 'og:video:url', 'og:video:secure_url', 'twitter:player:stream') and a.get('content'):
                 self.media.append(a['content'])
+                self.iframes.append(a['content'])  # may be a player page (YouTube embed, ...)
             elif key == 'og:title' and a.get('content') and not self.title:
                 self.title = a['content']
         elif tag == 'title':
             self._in_title = True
 
     def handle_endtag(self, tag):
+        if tag == 'video' and self._in_video:
+            self._in_video -= 1
         if tag == 'title':
             self._in_title = False
 
@@ -203,10 +246,10 @@ def find_in_html(url, log):
     referer = {'Referer': final}
     for raw in found:
         u = urllib.parse.urljoin(final, raw.strip())
-        if not u.startswith('http') or u in seen:
+        if not u.startswith('http') or u in seen or has_site_extractor(u):
             continue
         seen.add(u)
-        out.append(Candidate(u, title, kind_of(u), 'ページ内', '', referer))
+        out.append(Candidate(u, title, kind_of(u), 'ページ内', referer))
     for raw in p.iframes:
         u = urllib.parse.urljoin(final, raw.strip())
         if u in seen or not u.startswith('http') or not has_site_extractor(u):
@@ -214,6 +257,8 @@ def find_in_html(url, log):
         seen.add(u)
         log(f'埋め込みプレーヤーを調べています: {u}')
         out += find_with_ytdlp(u, log, referer)
+    from .probe import keep_videos
+    out = [c for c in out if c.source == 'yt-dlp'] + keep_videos([c for c in out if c.source != 'yt-dlp'], log)
     # manifests (whole stream) before single files; master playlists before variants
     out.sort(key=lambda c: (c.kind not in ('HLS', 'DASH'), 'master' not in c.url.lower()))
     return out

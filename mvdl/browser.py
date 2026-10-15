@@ -144,9 +144,7 @@ def sniff(url, log, wait=20, settle=4, stop=None, visible=False):
     page = {'title': url, 'url': url}
     try:
         proc, port = _launch(exe, profile, visible)
-        targets = json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/json/list', timeout=10))
-        target = next(t for t in targets if t.get('type') == 'page')
-        cdp = CDP(target['webSocketDebuggerUrl'])
+        cdp = CDP(_new_tab(port))
         ua = cdp.call('Browser.getVersion')['userAgent'].replace('HeadlessChrome', 'Chrome')
         cdp.call('Network.enable')
         if not visible:
@@ -213,7 +211,16 @@ def sniff(url, log, wait=20, settle=4, stop=None, visible=False):
             if cookie:
                 headers['Cookie'] = cookie
             kind = kind_of(u)
-            out.append(Candidate(u, page['title'], 'mp4' if kind == '動画' else kind, 'ブラウザ', '', headers))
+            out.append(Candidate(u, page['title'], 'mp4' if kind == '動画' else kind, 'ブラウザ', headers))
+        if cdp:  # done with the page: close the window before the (slower) checks
+            try:
+                cdp.call('Browser.close')
+            except Exception:  # noqa: BLE001
+                pass
+            cdp.close()
+            cdp = None
+        from .probe import keep_videos
+        out = keep_videos(out, log)
         out.sort(key=lambda c: (c.kind not in ('HLS', 'DASH'), 'master' not in c.url.lower()))
         if not out:
             log('ブラウザでも動画は見つかりませんでした')
@@ -233,6 +240,24 @@ def sniff(url, log, wait=20, settle=4, stop=None, visible=False):
                 proc.wait(5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+def _new_tab(port):
+    """Open our own tab and return its DevTools URL. A visible Edge also has hidden pages (side panel,
+    new-tab preload, ...), so picking "the first page" can drive one the user never sees."""
+    base = f'http://127.0.0.1:{port}'
+    version = json.load(urllib.request.urlopen(base + '/json/version', timeout=10))
+    browser = CDP(version['webSocketDebuggerUrl'])
+    try:
+        tid = browser.call('Target.createTarget', url='about:blank')['targetId']
+        for t in browser.call('Target.getTargets').get('targetInfos', []):
+            # the startup tab: an empty extra window tab
+            if t['type'] == 'page' and t['targetId'] != tid and t.get('url') == 'about:blank':
+                browser.call('Target.closeTarget', targetId=t['targetId'])
+        browser.call('Target.activateTarget', targetId=tid)
+    finally:
+        browser.close()
+    return f'ws://127.0.0.1:{port}/devtools/page/{tid}'
 
 
 def _eval(cdp, expr):
