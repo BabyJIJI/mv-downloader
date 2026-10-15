@@ -64,6 +64,7 @@ srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 base = f'http://127.0.0.1:{srv.server_port}'
 outdir = tempfile.mkdtemp()
+SHOTS = os.environ.get('MVDL_SHOTS') or os.path.join(tempfile.gettempdir(), 'mvdl-shots')
 result = {'step': 'start', 'errors': []}
 logs = []
 
@@ -87,6 +88,17 @@ def drive(app):
     states = lambda: [j.state for j in app.jobs.values()]  # noqa: E731
     view = {}
 
+    shots = {}
+
+    def screenshot(name):
+        """The interface page as an image (CI uploads them, to look at the design)."""
+        from Microsoft.Web.WebView2.Core import CoreWebView2CapturePreviewImageFormat
+        from System.IO import FileMode, FileStream
+        os.makedirs(SHOTS, exist_ok=True)
+        stream = FileStream(os.path.join(SHOTS, f'{name}.png'), FileMode.Create)
+        task = app.ui_core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream)
+        app.when_done([task], lambda: (stream.Close(), shots.__setitem__(name, True)))
+
     def ask_page():
         task = app.ui_core.ExecuteScriptAsync('JSON.stringify(mvdlView())')
         app.when_done([task], lambda: view.update(json.loads(json.loads(task.Result))))
@@ -106,6 +118,9 @@ def drive(app):
         ('ブラウザのページから探す', lambda: app.handle({'cmd': 'findPage'}),
          lambda: not app.searching and found() == [base + '/media/js.mp4']),
         ('画面の表示', ask_page, lambda: bool(view)),
+        ('スクリーンショット（見つかった動画）', lambda: screenshot('found'), lambda: 'found' in shots),
+        ('スクリーンショット（ダウンロード一覧）', lambda: app.send('tab', name='queue'), lambda: True),
+        ('', lambda: screenshot('queue'), lambda: 'queue' in shots),
     ]
     state = {'i': -1, 'since': time.time()}
     timer = appmod.Timer()
@@ -119,7 +134,7 @@ def drive(app):
                 fail(f'timed out at step {i + 1} ({steps[i][0]}): found={found()} jobs={states()} '
                      f'captured={len(app.capture)} web.Visible={app.web.Visible}')
             return
-        if i >= 0:
+        if i >= 0 and steps[i][0]:
             print(f'ok: {steps[i][0]}')
         if i + 1 == len(steps):
             timer.Stop()

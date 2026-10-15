@@ -35,6 +35,13 @@ jobs:
           pip install -r requirements.txt
           python tools/fetch_webview2.py
           python tests/smoke_app.py
+        env:
+          MVDL_SHOTS: ${{ runner.temp }}/shots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: ${{ runner.temp }}/shots
       - run: powershell -ExecutionPolicy Bypass -File build.ps1
       - name: The built exe starts and its browser comes up
         run: |
