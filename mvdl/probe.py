@@ -19,6 +19,9 @@ from .finder import Logger, fmt_resolution
 from .tools import find_tool, ydl_base_opts
 
 VIDEO_CODECS = ('avc1', 'avc3', 'hvc1', 'hev1', 'vp08', 'vp8', 'vp09', 'vp9', 'av01', 'mp4v', 'dvh1', 'dvhe')
+# ffprobe read the data and it is no media at all (an HTML page, ...); other errors mean we could not get it
+NOT_MEDIA_ERRORS = ('Invalid data found when processing input', 'could not find codec parameters',
+                    'Failed to find two consecutive MPEG audio frames')
 NOT_VIDEO_EXT = ('aac', 'mp3', 'm4a', 'opus', 'ogg', 'vtt', 'webvtt', 'srt', 'jpg', 'jpeg', 'png', 'webp', 'gif')
 
 
@@ -50,7 +53,10 @@ def _ffprobe(url, headers):
     flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     r = subprocess.run(cmd + [url], capture_output=True, timeout=40, creationflags=flags)
     if r.returncode:
-        raise RuntimeError(r.stderr.decode('utf-8', 'replace').strip().splitlines()[-1:] or 'ffprobe failed')
+        err = r.stderr.decode('utf-8', 'replace').strip()
+        if any(m in err for m in NOT_MEDIA_ERRORS):
+            return None  # read it, and it is not audio / video: a verdict, not an access problem
+        raise RuntimeError((err.splitlines() or ['ffprobe failed'])[-1])
     data = json.loads(r.stdout or b'{}')
     videos = [s for s in data.get('streams', [])
               if s.get('codec_type') == 'video' and not (s.get('disposition') or {}).get('attached_pic')
