@@ -1,14 +1,18 @@
-"""Drive the real window on Windows CI (WinForms + WebView2), against a local server:
+"""Drive the real window on Windows CI (the web-page interface + the built-in WebView2 browser), against a
+local server. Commands go in the way the page sends them (App.handle), and at the end the page itself is
+asked what it shows.
 
 1. 「URL から探す」 on a page with a <video> -> one video listed
 2. add it to the download queue -> saved
-3. open a page in the browser tab whose video is loaded by JavaScript -> the request is captured
-4. it shows in 「ブラウザで読み込んだ動画」, and can be queued from there -> saved
+3. open a page in the browser whose video is loaded by JavaScript -> the request is captured, the browser
+   is laid over the 「ブラウザ」 tab
+4. queue it from 「ブラウザで読み込んだ動画」 -> saved
 5. 「ブラウザのページから探す」 -> that video listed (with the browser's cookie)
 
 Run: python tests/smoke_app.py
 """
 import http.server
+import json
 import os
 import sys
 import tempfile
@@ -32,7 +36,6 @@ PAGES = {
                 'setTimeout(() => { const v = document.createElement("video"); v.muted = true; v.autoplay = true;'
                 ' v.src = "/media/" + "js.mp4"; document.getElementById("p").appendChild(v); }, 1000);</script>',
 }
-SEEN_COOKIES = []
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -42,7 +45,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         p = self.path.split('?')[0]
         if p.startswith('/media/'):
-            SEEN_COOKIES.append(self.headers.get('Cookie'))
             data, ctype = VIDEO, 'video/mp4'
         elif p in PAGES:
             data, ctype = PAGES[p].encode(), 'text/html; charset=utf-8'
@@ -63,30 +65,47 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 base = f'http://127.0.0.1:{srv.server_port}'
 outdir = tempfile.mkdtemp()
 result = {'step': 'start', 'errors': []}
+logs = []
 
 
 def drive(app):
+    send = app.send
+
+    def capture_send(type_, **data):  # keep the log lines for the report
+        if type_ == 'log':
+            logs.append(data['text'])
+        send(type_, **data)
+
+    app.send = capture_send
+
     def fail(msg):
         result['errors'].append(msg)
         app.form.Close()
 
     app.browser_missing = lambda err: fail(f'WebView2 failed: {err}')
-    found_urls = lambda: [c.url for c in app.cands]  # noqa: E731
+    found = lambda: [c.url for c in app.cands]  # noqa: E731
+    states = lambda: [j.state for j in app.jobs.values()]  # noqa: E731
+    view = {}
+
+    def ask_page():
+        task = app.ui_core.ExecuteScriptAsync('JSON.stringify(mvdlView())')
+        app.when_done([task], lambda: view.update(json.loads(json.loads(task.Result))))
+
     steps = [
-        ('URL から探す', lambda: (setattr(app.url, 'Text', base + '/video.html'), app.on_find_url()),
-         lambda: not app.searching and found_urls() == [base + '/media/plain.mp4']),
-        ('ダウンロードに追加', lambda: (setattr(app.outdir, 'Text', outdir), app.found.Items[0].__setattr__('Selected', True),
-                                app.on_enqueue()),
-         lambda: [j.state for j in app.jobs.values()] == [appmod.DONE]),
-        ('ブラウザで開く', lambda: (setattr(app.url, 'Text', base + '/js.html'), app.on_open_in_browser()),
-         lambda: app.core is not None and len(app.capture) >= 1),
-        ('「ブラウザで読み込んだ動画」タブから追加',
-         lambda: (setattr(app.tabs, 'SelectedTab', app.tab_captured), app.captured.Items[0].__setattr__('Selected', True),
-                  app.on_enqueue()),
-         lambda: app.captured.Items.Count == 1 and app.captured.Items[0].SubItems[3].Text == base + '/media/js.mp4'
-         and [j.state for j in app.jobs.values()] == [appmod.DONE, appmod.DONE]),
-        ('ブラウザのページから探す', app.on_find_page,
-         lambda: not app.searching and found_urls() == [base + '/media/js.mp4']),
+        ('画面とブラウザの準備', lambda: None, lambda: app.ui_ready and app.core is not None),
+        ('URL から探す', lambda: app.handle({'cmd': 'set', 'key': 'outdir', 'value': outdir})
+         or app.handle({'cmd': 'findUrl', 'url': base + '/video.html'}),
+         lambda: not app.searching and found() == [base + '/media/plain.mp4']),
+        ('ダウンロードに追加', lambda: app.handle({'cmd': 'enqueue', 'from': 'found', 'ids': ['0']}),
+         lambda: states() == [appmod.DONE]),
+        ('ブラウザで開く', lambda: app.handle({'cmd': 'openInBrowser', 'url': base + '/js.html'}),
+         lambda: len(app.capture) >= 1 and app.web.Visible and app.web.Width > 100),
+        ('「ブラウザで読み込んだ動画」から追加',
+         lambda: app.handle({'cmd': 'enqueue', 'from': 'captured', 'ids': [base + '/media/js.mp4']}),
+         lambda: states() == [appmod.DONE, appmod.DONE]),
+        ('ブラウザのページから探す', lambda: app.handle({'cmd': 'findPage'}),
+         lambda: not app.searching and found() == [base + '/media/js.mp4']),
+        ('画面の表示', ask_page, lambda: bool(view)),
     ]
     state = {'i': -1, 'since': time.time()}
     timer = appmod.Timer()
@@ -97,17 +116,14 @@ def drive(app):
         if i >= 0 and not steps[i][2]():
             if time.time() - state['since'] > 60:
                 timer.Stop()
-                fail(f'timed out at step {i + 1} ({steps[i][0]}): found={found_urls()} '
-                     f'jobs={[j.state for j in app.jobs.values()]} captured={len(app.capture)}\n'
-                     f'log:\n{app.log_box.Text}')
+                fail(f'timed out at step {i + 1} ({steps[i][0]}): found={found()} jobs={states()} '
+                     f'captured={len(app.capture)} web.Visible={app.web.Visible}')
             return
         if i >= 0:
             print(f'ok: {steps[i][0]}')
         if i + 1 == len(steps):
             timer.Stop()
-            result['step'] = 'done'
-            result['js_cookie'] = app.cands[0].headers.get('Cookie')
-            result['log'] = app.log_box.Text
+            result.update(step='done', view=view, js_cookie=app.cands[0].headers.get('Cookie'))
             app.form.Close()
             return
         state['i'], state['since'] = i + 1, time.time()
@@ -120,9 +136,10 @@ def drive(app):
 
 
 appmod.run(setup=drive)
-print(result.get('log', ''))
+print('\n'.join(logs))
 assert not result['errors'], '\n'.join(result['errors'])
 assert result['step'] == 'done', result
-assert [f for f in os.listdir(outdir) if f.endswith('.mp4')], os.listdir(outdir)
+assert len([f for f in os.listdir(outdir) if f.endswith('.mp4')]) == 2, os.listdir(outdir)
 assert result['js_cookie'] and 'sess=abc' in result['js_cookie'], result['js_cookie']
+assert result['view'] == {'tab': 'found', 'found': 1, 'captured': 1, 'queue': 2}, result['view']
 print('app ok')
