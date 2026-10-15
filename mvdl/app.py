@@ -330,6 +330,11 @@ class App:
         core.DocumentTitleChanged += lambda s, a: setattr(self.form, 'Text', f'{core.DocumentTitle} - {APP}')
         core.NewWindowRequested += self.on_new_window
         self.log(f'ブラウザ: WebView2 {core.Environment.BrowserVersionString}')
+        if os.environ.get('MVDL_STARTUP_CHECK'):  # build check: the exe starts and its browser comes up
+            with open(os.environ['MVDL_STARTUP_CHECK'], 'w', encoding='utf-8') as fh:
+                fh.write(core.Environment.BrowserVersionString)
+            self.form.Close()
+            return
         if self.pending_url:
             self.navigate(self.pending_url)
 

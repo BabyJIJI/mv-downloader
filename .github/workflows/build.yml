@@ -36,6 +36,13 @@ jobs:
           python tools/fetch_webview2.py
           python tests/smoke_app.py
       - run: powershell -ExecutionPolicy Bypass -File build.ps1
+      - name: The built exe starts and its browser comes up
+        run: |
+          $env:MVDL_STARTUP_CHECK = "$env:RUNNER_TEMP\startup.txt"
+          $p = Start-Process dist\mvdl.exe -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'mvdl.exe did not finish starting' }
+          if (-not (Test-Path $env:MVDL_STARTUP_CHECK)) { throw "mvdl.exe exited ($($p.ExitCode)) before its browser came up" }
+          "WebView2: $(Get-Content $env:MVDL_STARTUP_CHECK)"
       - uses: actions/upload-artifact@v4
         with:
           name: mvdl-win64
