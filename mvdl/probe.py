@@ -152,8 +152,15 @@ def check(c, log):
             info, children = _check_hls(c, log)
         else:
             info, children = _check_file(c, log), set()
-    except Exception as e:  # noqa: BLE001 - unreachable or unreadable: not a video we can save
-        log(f'確認できないので除きました: {c.url}（{str(e)[:120]}）')
+    except Exception as e:  # noqa: BLE001 - unreachable or unreadable
+        reason = str(e).replace('ERROR: ', '')[:200]
+        if c.source == 'ブラウザ':
+            # the browser itself received it as a video; only our own request was refused (bot check,
+            # one-time URL, ...), so keep it and let the user decide
+            c.source = 'ブラウザ（未確認）'
+            log(f'中身を確かめられませんでしたが、ブラウザが動画として受け取ったので残します: {c.url}（{reason}）')
+            return c, set()
+        log(f'確認できないので除きました: {c.url}（{reason}）')
         return None, set()
     if info is None:
         log(f'動画ではないので除きました: {c.url}')

@@ -11,6 +11,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 
 import clr  # pythonnet
@@ -18,7 +19,7 @@ import clr  # pythonnet
 from . import __version__
 from .capture import Capture, is_media
 from .downloader import QUALITIES, Cancelled, download
-from .finder import Blocked, Candidate, find_in_page, find_videos, fmt_duration, fmt_size
+from .finder import Blocked, Candidate, find_in_page, find_videos, fmt_duration, fmt_size, kind_of
 from .tools import find_tool
 
 clr.AddReference('System.Windows.Forms')
@@ -35,7 +36,8 @@ from System.Drawing import Font, Size  # noqa: E402
 from System.Threading import ApartmentState, Thread, ThreadStart  # noqa: E402
 from System.Windows.Forms import (  # noqa: E402
     AnchorStyles, Application, AutoScaleMode, Button, Clipboard, ColumnStyle, ComboBox, ComboBoxStyle,
-    DialogResult, DockStyle, FixedPanel, FlowLayoutPanel, FolderBrowserDialog, Form, Keys, Label, ListView, ListViewItem,
+    DialogResult, DockStyle, FixedPanel, FlowLayoutPanel, FolderBrowserDialog, Form, Keys, Label, LinkLabel, ListView,
+    ListViewItem,
     MessageBox, MessageBoxButtons, MessageBoxIcon, Orientation, Padding, ProgressBar, ProgressBarStyle,
     RowStyle, ScrollBars, SizeType, SplitContainer, TableLayoutPanel, TabControl, TabPage, TextBox, Timer, View)
 
@@ -197,7 +199,9 @@ class App:
         self.find_btn = button('URL から探す', self.on_find_url, 150)
         self.open_btn = button('ブラウザで開く', self.on_open_in_browser, 150)
         self.page_btn = button('ブラウザのページから探す', self.on_find_page, 306)
-        self.captured_lbl = label('ブラウザのページで読み込んだ動画: 0 件')
+        self.captured_lbl = LinkLabel()  # click: show them
+        self.captured_lbl.AutoSize = True
+        self.captured_lbl.LinkClicked += lambda s, e: setattr(self.tabs, 'SelectedTab', self.tab_captured)
         self.bar = ProgressBar()
         self.bar.Style = ProgressBarStyle.Marquee
         self.bar.MarqueeAnimationSpeed = 0
@@ -268,6 +272,10 @@ class App:
         browser.Controls.Add(nav, 0, 0)
         browser.Controls.Add(self.web, 0, 1)
 
+        # everything the browser received as a video, unchecked, as it comes in
+        self.captured = list_view([('時刻', 70), ('種類', 70), ('Content-Type', 170), ('URL', 700)])
+        self.captured.DoubleClick += lambda s, e: self.on_enqueue()
+
         self.queue = list_view([('タイトル', 520), ('画質', 90), ('サイズ', 95), ('状態', 300)])
         self.queue.DoubleClick += lambda s, e: self.on_open_folder()
 
@@ -281,6 +289,7 @@ class App:
         self.tabs.Dock = DockStyle.Fill
         self.tab_found = tab(self.tabs, '見つかった動画', self.found)
         self.tab_browser = tab(self.tabs, 'ブラウザ', browser)
+        self.tab_captured = tab(self.tabs, 'ブラウザで読み込んだ動画', self.captured)
         self.tab_queue = tab(self.tabs, 'ダウンロード一覧', self.queue)
         self.tab_log = tab(self.tabs, 'ログ', self.log_box)
 
@@ -302,6 +311,7 @@ class App:
     # ---- browser ----------------------------------------------------------------------------------
     def on_load(self, start_url):
         self.split.SplitterDistance = 360
+        self.update_captured_label()
         self.update_queue_label()
         if not find_tool('ffmpeg'):
             self.log('ffmpeg が見つかりません。exe と同じフォルダに ffmpeg.exe を置くと、高画質の動画も保存できます')
@@ -341,7 +351,8 @@ class App:
     def on_navigation(self, sender, e):
         if not e.IsRedirected:  # a new page: what the previous one loaded no longer counts
             self.capture.reset()
-            self.captured_lbl.Text = 'ブラウザのページで読み込んだ動画: 0 件'
+            self.captured.Items.Clear()
+            self.update_captured_label()
 
     def on_response(self, sender, e):
         """Every response the browser receives (all frames). Cheap unless it is a video."""
@@ -349,9 +360,17 @@ class App:
         mime = e.Response.Headers.GetHeader('Content-Type') if e.Response.Headers.Contains('Content-Type') else ''
         if not is_media(uri, mime):
             return
-        headers = {kv.Key: kv.Value for kv in e.Request.Headers}
-        if self.capture.add(uri, mime, headers):
-            self.captured_lbl.Text = f'ブラウザのページで読み込んだ動画: {len(self.capture)} 件'
+        m = self.capture.add(uri, mime, {kv.Key: kv.Value for kv in e.Request.Headers})
+        if m:
+            kind = kind_of(m.url)
+            item = ListViewItem(Array[String]([time.strftime('%H:%M:%S', time.localtime(m.at)),
+                                               'mp4' if kind == '動画' else kind, m.mime or '—', m.url]))
+            item.Name = m.url
+            self.captured.Items.Add(item)
+            self.update_captured_label()
+
+    def update_captured_label(self):
+        self.captured_lbl.Text = f'ブラウザのページで読み込んだ動画: {len(self.capture)} 件（クリックで表示）'
 
     def on_new_window(self, sender, e):
         """Links that open a new tab stay in this browser (so their videos are seen). Sized pop-ups
@@ -589,11 +608,38 @@ class App:
         return [item.Name for item in lv.SelectedItems]
 
     def on_enqueue(self):
+        """The selection of the tab in view: 「ブラウザで読み込んだ動画」, else 「見つかった動画」."""
+        if self.tabs.SelectedTab == self.tab_captured:
+            self.enqueue_captured()
+            return
         sel = [self.cands[int(i)] for i in self.selected(self.found)]
         if not sel:
             self.tabs.SelectedTab = self.tab_found
-            MessageBox.Show('ダウンロードする動画を「見つかった動画」から選んでください', APP)
+            MessageBox.Show('ダウンロードする動画を「見つかった動画」か「ブラウザで読み込んだ動画」から選んでください', APP)
             return
+        self.add_jobs(sel)
+
+    def enqueue_captured(self):
+        """As the browser loaded them (no check), with the cookies it sent or holds."""
+        urls = self.selected(self.captured)
+        if not urls:
+            MessageBox.Show('ダウンロードする動画を一覧から選んでください', APP)
+            return
+        core = self.core
+        page_url, title, ua = core.Source, core.DocumentTitle, core.Settings.UserAgent
+        tasks = {u: core.CookieManager.GetCookiesAsync(u) for u in urls}
+
+        def ready():
+            cookies = {u: '; '.join(f'{c.Name}={c.Value}' for c in t.Result)
+                       for u, t in tasks.items() if not t.IsFaulted and t.Result is not None}
+            cands = self.capture.candidates(page_url, title, ua, cookies.get, set(urls))
+            for c in cands:
+                c.source = 'ブラウザ（未確認）'
+            self.add_jobs(cands)
+
+        self.when_done(list(tasks.values()), ready)
+
+    def add_jobs(self, sel):
         outdir, quality = self.outdir.Text.strip() or default_outdir(), str(self.quality.SelectedItem)
         active = {(j.cand.url, j.quality) for j in self.jobs.values() if j.state in (WAITING, RUNNING)}
         added = 0

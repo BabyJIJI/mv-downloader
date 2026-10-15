@@ -3,7 +3,8 @@
 1. 「URL から探す」 on a page with a <video> -> one video listed
 2. add it to the download queue -> saved
 3. open a page in the browser tab whose video is loaded by JavaScript -> the request is captured
-4. 「ブラウザのページから探す」 -> that video listed (with the browser's cookie)
+4. it shows in 「ブラウザで読み込んだ動画」, and can be queued from there -> saved
+5. 「ブラウザのページから探す」 -> that video listed (with the browser's cookie)
 
 Run: python tests/smoke_app.py
 """
@@ -79,6 +80,11 @@ def drive(app):
          lambda: [j.state for j in app.jobs.values()] == [appmod.DONE]),
         ('ブラウザで開く', lambda: (setattr(app.url, 'Text', base + '/js.html'), app.on_open_in_browser()),
          lambda: app.core is not None and len(app.capture) >= 1),
+        ('「ブラウザで読み込んだ動画」タブから追加',
+         lambda: (setattr(app.tabs, 'SelectedTab', app.tab_captured), app.captured.Items[0].__setattr__('Selected', True),
+                  app.on_enqueue()),
+         lambda: app.captured.Items.Count == 1 and app.captured.Items[0].SubItems[3].Text == base + '/media/js.mp4'
+         and [j.state for j in app.jobs.values()] == [appmod.DONE, appmod.DONE]),
         ('ブラウザのページから探す', app.on_find_page,
          lambda: not app.searching and found_urls() == [base + '/media/js.mp4']),
     ]

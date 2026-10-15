@@ -97,6 +97,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path.startswith('/media/'):
             SEEN_HEADERS.append(dict(self.headers))
+        if path == '/media/browser-only.mp4':  # refuses anyone but the browser
+            self.send_error(403)
+            return
         if path in PAGES:
             data, ctype = PAGES[path].replace(b'HOST', self.headers['Host'].encode()), 'text/html; charset=utf-8'
         elif path in FILES:
@@ -265,3 +268,13 @@ def test_find_in_page_merges_capture_and_dom(server, check_mode):
                          {'User-Agent': 'UA'}, print)
     assert sorted(c.url for c in found) == [server + '/media/clip.mp4', server + '/media/master.m3u8']
     assert found[0].kind == 'HLS' and found[0].headers['Cookie'] == 'k=v'
+
+
+def test_browser_video_kept_when_our_check_is_refused(server, check_mode):
+    """Captured by the browser but refused to us (403): kept as unchecked. From the HTML: dropped."""
+    cap = Capture()
+    cap.add(server + '/media/browser-only.mp4', 'video/mp4', {})
+    found = find_in_page(server + '/page', 'T', '', cap.candidates(server + '/page', 'T', 'UA'), {}, print)
+    assert [(c.url, c.source) for c in found] == [(server + '/media/browser-only.mp4', 'ブラウザ（未確認）')]
+    dom = f'<video src="{server}/media/browser-only.mp4"></video>'
+    assert find_in_page(server + '/page', 'T', dom, [], {}, print) == []
