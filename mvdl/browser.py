@@ -5,9 +5,7 @@ Talks to the browser over the DevTools protocol directly, so no Playwright / bro
 """
 import json
 import os
-import shutil
 import subprocess
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -90,19 +88,31 @@ def is_media(url, mime):
     return ext in MEDIA_EXT or mime.startswith(MEDIA_MIME)
 
 
-def _launch(exe, profile):
-    args = [exe, '--headless=new', '--remote-debugging-port=0', f'--user-data-dir={profile}',
-            '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--mute-audio',
+def profile_dir():
+    """Kept between runs so a passed Cloudflare check or a login carries over."""
+    base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~/.cache')
+    return os.path.join(base, 'mvdl', 'browser')
+
+
+def _launch(exe, profile, visible):
+    args = [exe, '--remote-debugging-port=0', f'--user-data-dir={profile}',
+            '--no-first-run', '--no-default-browser-check', '--disable-extensions',
             '--autoplay-policy=no-user-gesture-required', '--window-size=1280,800',
             # keep cross-origin iframes in the page's process so their requests show up too
             '--disable-features=IsolateOrigins,site-per-process', '--disable-site-isolation-trials',
             'about:blank']
+    if not visible:
+        args[1:1] = ['--headless=new', '--mute-audio']
+    port_file = os.path.join(profile, 'DevToolsActivePort')
+    try:
+        os.remove(port_file)  # left over from the previous run
+    except OSError:
+        pass
     flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
-    port_file = os.path.join(profile, 'DevToolsActivePort')
     for _ in range(150):
         if proc.poll() is not None:
-            raise RuntimeError('ブラウザが起動しませんでした')
+            raise RuntimeError('ブラウザが起動しませんでした（前回のブラウザの画面が開いたままなら閉じてください）')
         if os.path.isfile(port_file):
             lines = open(port_file).read().split()
             if lines:
@@ -112,55 +122,98 @@ def _launch(exe, profile):
     raise RuntimeError('ブラウザに接続できませんでした')
 
 
-def sniff(url, log, wait=20, settle=4, stop=None):
-    """Return media URLs the page loads within `wait` seconds (stops `settle` s after the last new one)."""
+def sniff(url, log, wait=20, settle=4, stop=None, visible=False):
+    """Return the media URLs the page loads.
+
+    Headless: stops after `wait` s, or `settle` s after the last new one.
+    Visible: the user passes Cloudflare / logs in / plays the video; runs until `stop` is set or the
+    window is closed. The headers each media request really carried (Cookie, User-Agent, Referer) are
+    kept for the download.
+    """
     exe = find_browser()
     if not exe:
         log('Edge / Chrome が見つからないため、ブラウザでの検索はできません')
         return []
-    profile = tempfile.mkdtemp(prefix='mvdl-')
+    profile = profile_dir()
+    os.makedirs(profile, exist_ok=True)
+    if visible:
+        wait = 30 * 60
     proc = cdp = None
+    found = {}     # url -> requestId
+    sent = {}      # requestId -> headers as sent (from requestWillBeSentExtraInfo)
+    page = {'title': url, 'url': url}
     try:
-        proc, port = _launch(exe, profile)
+        proc, port = _launch(exe, profile, visible)
         targets = json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/json/list', timeout=10))
-        page = next(t for t in targets if t.get('type') == 'page')
-        cdp = CDP(page['webSocketDebuggerUrl'])
+        target = next(t for t in targets if t.get('type') == 'page')
+        cdp = CDP(target['webSocketDebuggerUrl'])
         ua = cdp.call('Browser.getVersion')['userAgent'].replace('HeadlessChrome', 'Chrome')
         cdp.call('Network.enable')
-        cdp.call('Network.setUserAgentOverride', userAgent=ua)
+        if not visible:
+            cdp.call('Network.setUserAgentOverride', userAgent=ua)
         cdp.call('Page.enable')
         cdp.call('Page.addScriptToEvaluateOnNewDocument', source=AUTOPLAY_JS)
         cdp.call('Page.navigate', url=url)
+        if visible:
+            log('ブラウザの画面で確認（Cloudflare など）やログインを済ませ、動画を再生してください。'
+                '終わったら「完了」を押すか、ブラウザを閉じてください')
 
-        found = {}  # url -> (mime, referer)
         start = last = time.time()
-        while time.time() - start < wait and not (found and time.time() - last > settle):
+        while time.time() - start < wait:
             if stop is not None and stop.is_set():
                 break
-            ev = cdp.event(0.5)
+            if not visible and found and time.time() - last > settle:
+                break
+            try:
+                ev = cdp.event(0.5)
+            except (websocket.WebSocketException, OSError):
+                log('ブラウザが閉じられました')
+                cdp = None
+                break
             if not ev:
                 continue
             m, p = ev.get('method'), ev.get('params', {})
             if m == 'Network.requestWillBeSent':
-                u, ref = p['request']['url'], p['request'].get('headers', {}).get('Referer')
+                u = p['request']['url']
                 if u not in found and is_media(u, None):
-                    found[u], last = ('', ref), time.time()
+                    found[u], last = p['requestId'], time.time()
                     log(f'見つかりました: {u}')
             elif m == 'Network.responseReceived':
-                u, mime = p['response']['url'], p['response'].get('mimeType', '')
-                if u not in found and is_media(u, mime):
-                    found[u], last = (mime, None), time.time()
+                u = p['response']['url']
+                if u not in found and is_media(u, p['response'].get('mimeType', '')):
+                    found[u], last = p['requestId'], time.time()
                     log(f'見つかりました: {u}')
+            elif m == 'Network.requestWillBeSentExtraInfo':
+                h = {k.lower(): v for k, v in p.get('headers', {}).items()}
+                sent[p['requestId']] = {k: h[k] for k in ('cookie', 'user-agent', 'referer') if k in h}
+            elif m == 'Page.loadEventFired':
+                try:
+                    page['title'] = _eval(cdp, 'document.title') or page['title']
+                    page['url'] = _eval(cdp, 'location.href') or page['url']
+                except CDPError:
+                    pass
 
-        title = cdp.call('Runtime.evaluate', expression='document.title').get('result', {}).get('value') or url
-        page_url = cdp.call('Runtime.evaluate', expression='location.href').get('result', {}).get('value') or url
+        if cdp:
+            try:
+                page['title'] = _eval(cdp, 'document.title') or page['title']
+                page['url'] = _eval(cdp, 'location.href') or page['url']
+            except (CDPError, websocket.WebSocketException, OSError):
+                pass
         out = []
-        for u, (_mime, ref) in found.items():
-            cookies = cdp.call('Network.getCookies', urls=[u]).get('cookies', [])
-            headers = {'Referer': ref or page_url, 'User-Agent': ua}
-            if cookies:
-                headers['Cookie'] = '; '.join(f"{c['name']}={c['value']}" for c in cookies)
-            out.append(Candidate(u, title, kind_of(u) if kind_of(u) != '動画' else 'mp4', 'ブラウザ', '', headers))
+        for u, rid in found.items():
+            h = sent.get(rid, {})
+            headers = {'Referer': h.get('referer') or page['url'], 'User-Agent': h.get('user-agent') or ua}
+            cookie = h.get('cookie')
+            if not cookie and cdp:
+                try:
+                    cookies = cdp.call('Network.getCookies', urls=[u]).get('cookies', [])
+                    cookie = '; '.join(f"{c['name']}={c['value']}" for c in cookies)
+                except (CDPError, websocket.WebSocketException, OSError):
+                    pass
+            if cookie:
+                headers['Cookie'] = cookie
+            kind = kind_of(u)
+            out.append(Candidate(u, page['title'], 'mp4' if kind == '動画' else kind, 'ブラウザ', '', headers))
         out.sort(key=lambda c: (c.kind not in ('HLS', 'DASH'), 'master' not in c.url.lower()))
         if not out:
             log('ブラウザでも動画は見つかりませんでした')
@@ -180,4 +233,7 @@ def sniff(url, log, wait=20, settle=4, stop=None):
                 proc.wait(5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+
+
+def _eval(cdp, expr):
+    return cdp.call('Runtime.evaluate', expression=expr).get('result', {}).get('value')

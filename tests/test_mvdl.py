@@ -6,7 +6,7 @@ import pytest
 
 from mvdl.browser import is_media
 from mvdl.downloader import download
-from mvdl.finder import Candidate, find_in_html, find_videos, find_with_ytdlp, kind_of
+from mvdl.finder import Blocked, Candidate, find_in_html, find_videos, find_with_ytdlp, kind_of
 
 VIDEO = b'\x00\x00\x00\x18ftypmp42' + b'\x00' * 4096  # content does not matter without ffmpeg
 
@@ -21,6 +21,9 @@ PAGES = {
 }
 
 
+SEEN_HEADERS = []
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -30,6 +33,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self, body=True):
         path = self.path.split('?')[0]
+        if path == '/cf.html':  # what Cloudflare's bot check answers
+            data = b'<html><head><title>Just a moment...</title></head><body></body></html>'
+            self.send_response(403)
+            self.send_header('Server', 'cloudflare')
+            self.send_header('cf-mitigated', 'challenge')
+            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            if body:
+                self.wfile.write(data)
+            return
+        if path.startswith('/media/'):
+            SEEN_HEADERS.append(dict(self.headers))
         if path in PAGES:
             data, ctype = PAGES[path].replace(b'HOST', self.headers['Host'].encode()), 'text/html; charset=utf-8'
         elif path == '/media/clip.mp4':
@@ -97,3 +113,19 @@ def test_download_direct(server, tmp_path):
     assert os.path.basename(files[0]).endswith('.mp4')
     assert open(files[0], 'rb').read() == VIDEO
     assert progress and progress[-1] == 1.0
+
+
+def test_cloudflare_block(server):
+    with pytest.raises(Blocked):
+        find_videos(server + '/cf.html', print, use_browser=True)
+
+
+def test_download_sends_browser_headers(server, tmp_path):
+    SEEN_HEADERS.clear()
+    c = Candidate(server + '/media/clip.mp4', 'cookie test', 'mp4', 'ブラウザ', '',
+                  {'Referer': server + '/page', 'User-Agent': 'Mozilla/5.0 test-ua', 'Cookie': 'cf_clearance=abc'})
+    download(c, str(tmp_path), '最高画質', print)
+    got = SEEN_HEADERS[-1]
+    assert got.get('User-Agent') == 'Mozilla/5.0 test-ua'
+    assert got.get('Referer') == server + '/page'
+    assert 'cf_clearance=abc' in got.get('Cookie', '')

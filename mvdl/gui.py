@@ -10,7 +10,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
 from .downloader import QUALITIES, Cancelled, download
-from .finder import find_videos
+from .browser import sniff
+from .finder import Blocked, find_videos
 from .tools import find_tool
 
 SETTINGS = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~/.config'), 'mvdl', 'settings.json')
@@ -50,6 +51,7 @@ class App:
         self.q = queue.Queue()     # (kind, payload) from worker threads
         self.stop = threading.Event()
         self.busy = False
+        self.blocked = False
         self.cands = []
         s = load_settings()
 
@@ -59,6 +61,7 @@ class App:
         f = ttk.Frame(root, padding=10)
         f.pack(fill='both', expand=True)
         f.columnconfigure(1, weight=1)
+        f.columnconfigure(3, weight=0)
 
         ttk.Label(f, text='ページの URL').grid(row=0, column=0, sticky='w')
         self.url = tk.StringVar()
@@ -67,13 +70,15 @@ class App:
         e.bind('<Return>', lambda _: self.on_find())
         self.find_btn = ttk.Button(f, text='動画を探す', command=self.on_find)
         self.find_btn.grid(row=0, column=2)
+        self.open_btn = ttk.Button(f, text='ブラウザで開いて探す', command=self.on_open_browser)
+        self.open_btn.grid(row=0, column=3, padx=(6, 0))
         self.use_browser = tk.BooleanVar(value=s.get('use_browser', True))
         ttk.Checkbutton(f, text='見つからないときは Edge で再生して探す（JavaScript で読み込む動画）',
-                        variable=self.use_browser).grid(row=1, column=1, columnspan=2, sticky='w', pady=(4, 6))
+                        variable=self.use_browser).grid(row=1, column=1, columnspan=3, sticky='w', pady=(4, 6))
 
         cols = ('title', 'kind', 'detail', 'source')
         tf = ttk.Frame(f)
-        tf.grid(row=2, column=0, columnspan=3, sticky='nsew')
+        tf.grid(row=2, column=0, columnspan=4, sticky='nsew')
         f.rowconfigure(2, weight=3)
         tf.columnconfigure(0, weight=1)
         tf.rowconfigure(0, weight=1)
@@ -91,10 +96,10 @@ class App:
         ttk.Label(f, text='保存先').grid(row=3, column=0, sticky='w', pady=(8, 0))
         self.outdir = tk.StringVar(value=s.get('outdir') or default_outdir())
         ttk.Entry(f, textvariable=self.outdir).grid(row=3, column=1, sticky='ew', padx=6, pady=(8, 0))
-        ttk.Button(f, text='参照…', command=self.on_browse).grid(row=3, column=2, pady=(8, 0))
+        ttk.Button(f, text='参照…', command=self.on_browse).grid(row=3, column=2, columnspan=2, sticky='w', pady=(8, 0))
 
         bf = ttk.Frame(f)
-        bf.grid(row=4, column=0, columnspan=3, sticky='ew', pady=8)
+        bf.grid(row=4, column=0, columnspan=4, sticky='ew', pady=8)
         ttk.Label(bf, text='画質').pack(side='left')
         self.quality = tk.StringVar(value=s.get('quality') if s.get('quality') in QUALITIES else '最高画質')
         ttk.Combobox(bf, textvariable=self.quality, values=list(QUALITIES), state='readonly',
@@ -106,13 +111,13 @@ class App:
         ttk.Button(bf, text='保存先を開く', command=self.on_open).pack(side='right')
 
         self.bar = ttk.Progressbar(f, maximum=1.0)
-        self.bar.grid(row=5, column=0, columnspan=3, sticky='ew')
+        self.bar.grid(row=5, column=0, columnspan=4, sticky='ew')
         self.status = tk.StringVar(value='URL を貼り付けて「動画を探す」を押してください')
-        ttk.Label(f, textvariable=self.status).grid(row=6, column=0, columnspan=3, sticky='w', pady=(4, 4))
+        ttk.Label(f, textvariable=self.status).grid(row=6, column=0, columnspan=4, sticky='w', pady=(4, 4))
 
         self.log_box = tk.Text(f, height=8, wrap='char', state='disabled', relief='flat',
                                background=root.cget('background'))
-        self.log_box.grid(row=7, column=0, columnspan=3, sticky='nsew')
+        self.log_box.grid(row=7, column=0, columnspan=4, sticky='nsew')
         f.rowconfigure(7, weight=1)
 
         if not find_tool('ffmpeg'):
@@ -139,9 +144,11 @@ class App:
     def set_busy(self, busy):
         self.busy = busy
         self.find_btn.configure(state='disabled' if busy else 'normal')
+        self.open_btn.configure(state='disabled' if busy else 'normal')
         self.dl_btn.configure(state='disabled' if busy else 'normal')
         self.stop_btn.configure(state='normal' if busy else 'disabled')
         if not busy:
+            self.stop_btn.configure(text='中止')
             self.bar.stop()
             self.bar.configure(mode='determinate')
 
@@ -181,14 +188,29 @@ class App:
                     self.status.set(text)
                 elif kind == 'found':
                     self.show(v)
+                elif kind == 'blocked':
+                    self.blocked = True
                 elif kind == 'error':
                     self.log('エラー: ' + v)
                     self.status.set('エラーが発生しました（下のログを見てください）')
                 elif kind == 'done':
                     self.set_busy(False)
+                    if self.blocked:  # after 'done', so the browser run is not marked finished by this one
+                        self.blocked = False
+                        self.ask_browser()
         except queue.Empty:
             pass
         self.root.after(100, self.poll)
+
+    def ask_browser(self):
+        if messagebox.askyesno(
+                '動画ダウンローダー',
+                'Cloudflare の確認画面（ボット対策）で止められました。\n\n'
+                'ブラウザを開くので、確認を通して動画を再生してください。'
+                '見つかった動画を一覧に出します。\n\nブラウザを開きますか？'):
+            self.on_open_browser()
+        else:
+            self.status.set('Cloudflare の確認画面で止められました')
 
     def show(self, cands):
         self.cands = cands
@@ -204,17 +226,40 @@ class App:
 
     # ---- actions --------------------------------------------------------------------------------
     def on_find(self):
-        url = self.url.get().strip()
+        url = self.normalized_url()
         if self.busy or not url:
             return
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
-            self.url.set(url)
         self.tree.delete(*self.tree.get_children())
         self.log(f'--- {url}')
         self.q.put(('progress', (None, '探しています…')))
         log = lambda m: self.q.put(('log', m))  # noqa: E731
-        self.run(lambda: self.q.put(('found', find_videos(url, log, self.use_browser.get(), self.stop))))
+
+        def work():
+            try:
+                self.q.put(('found', find_videos(url, log, self.use_browser.get(), self.stop)))
+            except Blocked:
+                self.q.put(('blocked', None))
+
+        self.run(work)
+
+    def on_open_browser(self):
+        """Visible Edge: the user passes Cloudflare / logs in and plays the video; we watch the traffic."""
+        url = self.normalized_url()
+        if self.busy or not url:
+            return
+        self.tree.delete(*self.tree.get_children())
+        self.log(f'--- {url}（ブラウザ）')
+        self.q.put(('progress', (None, 'ブラウザで確認を済ませて動画を再生し、終わったら「完了」を押してください')))
+        log = lambda m: self.q.put(('log', m))  # noqa: E731
+        self.run(lambda: self.q.put(('found', sniff(url, log, stop=self.stop, visible=True))))
+        self.stop_btn.configure(text='完了')
+
+    def normalized_url(self):
+        url = self.url.get().strip()
+        if url and not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+            self.url.set(url)
+        return url
 
     def on_download(self):
         if self.busy:
@@ -252,7 +297,7 @@ class App:
 
     def on_stop(self):
         self.stop.set()
-        self.status.set('中止しています…')
+        self.status.set('ブラウザを閉じています…' if self.stop_btn.cget('text') == '完了' else '中止しています…')
 
     def on_browse(self):
         d = filedialog.askdirectory(initialdir=self.outdir.get() or default_outdir())

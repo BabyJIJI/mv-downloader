@@ -70,6 +70,20 @@ def _detail(info):
     return ' '.join(parts)
 
 
+def is_cloudflare_block(e):
+    """403 / 503 from Cloudflare's bot check (yt-dlp says so in the message; else look at the response)."""
+    if 'cloudflare' in str(e).lower():
+        return True
+    resp = getattr(e, 'response', None) or getattr(getattr(e, 'exc_info', [None, None])[1], 'response', None)
+    headers = getattr(resp, 'headers', None) or {}
+    return getattr(resp, 'status', None) in (403, 503) and (
+        headers.get('cf-mitigated') == 'challenge' or 'cloudflare' in (headers.get('server') or '').lower())
+
+
+class Blocked(Exception):
+    """The site's bot check (Cloudflare) refused us: only a visible browser, with the user, can get in."""
+
+
 def find_with_ytdlp(url, log, headers=None):
     opts = ydl_base_opts(Logger(log)) | {'skip_download': True, 'extract_flat': 'in_playlist',
                                          'playlistend': 500}
@@ -80,6 +94,8 @@ def find_with_ytdlp(url, log, headers=None):
             info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as e:
         log(f'yt-dlp: 見つかりませんでした（{_short(e)}）')
+        if is_cloudflare_block(e):
+            raise Blocked() from e
         return []
     if not info:
         return []
@@ -172,6 +188,8 @@ def find_in_html(url, log):
         text, final = fetch_page(url, log)
     except Exception as e:  # noqa: BLE001 - any network error means "nothing found here"
         log(f'ページを読み込めませんでした: {_short(e)}')
+        if is_cloudflare_block(e):
+            raise Blocked() from e
         return []
     p = _PageParser()
     try:
@@ -202,7 +220,10 @@ def find_in_html(url, log):
 
 
 def find_videos(url, log, use_browser=True, stop=None):
-    """Try each method in turn and return the first non-empty result."""
+    """Try each method in turn and return the first non-empty result.
+
+    Raises Blocked when Cloudflare's bot check stops us (a headless browser would be stopped too).
+    """
     log('yt-dlp で調べています…')
     found = find_with_ytdlp(url, log)
     if found:
