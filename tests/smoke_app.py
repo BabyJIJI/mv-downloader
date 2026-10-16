@@ -124,6 +124,17 @@ def drive(app):
         task = app.ui_core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream)
         app.when_done([task], lambda: (stream.Close(), shots.__setitem__(name, True)))
 
+    def check_selection():
+        # on the 4 rows of the download list: click 1st, Shift+click 3rd -> 3; Ctrl+click 2nd -> 2;
+        # checkbox 4th -> 3; Shift+click 1st (anchor 4th) -> 4; click 2nd -> 1; a bulk action -> 0
+        script = ('JSON.stringify([mvdlClick("queue", 0), mvdlClick("queue", 2, {shift: 1}), '
+                  'mvdlClick("queue", 1, {ctrl: 1}), mvdlClick("queue", 3, {checkbox: 1}), '
+                  'mvdlClick("queue", 0, {shift: 1}), mvdlClick("queue", 1), '
+                  '(document.querySelector("[data-act=resume]").click(), '
+                  'document.querySelectorAll("#queue tbody tr.sel").length)])')
+        task = app.ui_core.ExecuteScriptAsync(script)
+        app.when_done([task], lambda: result.__setitem__('selection', json.loads(json.loads(task.Result))))
+
     def ask_page():
         task = app.ui_core.ExecuteScriptAsync('JSON.stringify(mvdlView())')
         app.when_done([task], lambda: view.update(json.loads(json.loads(task.Result))))
@@ -169,6 +180,7 @@ def drive(app):
         ('', lambda: None, lambda: job('Slow2').state == appmod.CANCELLED
          and not any(f.startswith('Slow2') for f in os.listdir(outdir))),
         ('画面の表示', ask_page, lambda: bool(view)),
+        ('一覧の選択（クリック・Shift・Ctrl・一括操作で解除）', check_selection, lambda: 'selection' in result),
         ('スクリーンショット（見つかった動画）', lambda: screenshot('found'), lambda: 'found' in shots),
         ('スクリーンショット（ダウンロード一覧）', lambda: app.send('tab', name='queue'), lambda: True),
         ('', lambda: screenshot('queue'), lambda: 'queue' in shots),
@@ -219,4 +231,5 @@ assert result['js_cookie'] and 'sess=abc' in result['js_cookie'], result['js_coo
 assert result['view'] == {'tab': 'found', 'found': 1, 'captured': 2, 'queue': 4}, result['view']  # both tabs' videos
 print('title while downloading:', result['titles'], '/ at the end:', result['final_title'])
 assert result['final_title'] == '動画ダウンローダー — 完了 3', result['final_title']
+assert result['selection'] == [1, 3, 2, 3, 4, 1, 0], result['selection']
 print('app ok')

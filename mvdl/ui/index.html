@@ -99,6 +99,7 @@ section.view.on { display: flex; }
 .toolbar .note { color: var(--muted); font-size: 12px; margin-left: auto; }
 
 /* ---- tables */
+.table-wrap:focus { outline: none; }
 .table-wrap { flex: 1; min-height: 0; overflow: auto; background: var(--panel); border: 1px solid var(--line);
               border-radius: var(--radius); box-shadow: var(--shadow); }
 table { width: 100%; min-width: 760px; border-collapse: collapse; table-layout: fixed; }  /* narrow window: scroll, never squeeze the title away */
@@ -302,21 +303,45 @@ const EMPTY = {
 };
 const ICON_EMPTY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5z"/></svg>';
 
+let tab = 'found';  // the tab in view
+
 // ---- tables with checkbox selection
 const tables = {};
 function makeTable(name, cols, onOpen) {
-  const t = {name, rows: new Map(), sel: new Set(), el: $(`#${name}`), cols, onOpen};
-  const body = $('tbody', t.el);
+  const t = {name, rows: new Map(), sel: new Set(), anchor: null, el: $(`#${name}`), cols, onOpen};
+  const body = $('tbody', t.el), wrap = t.el.closest('.table-wrap');
+  const order = () => [...body.querySelectorAll('tr[data-id]')].map(tr => tr.dataset.id);
+  // selection as in Explorer: click = only this one, Ctrl+click / checkbox = toggle, Shift+click = range
+  // from the last clicked row (with Ctrl or on a checkbox: added to the selection), Ctrl+A, Esc
+  t.el.addEventListener('mousedown', e => { if (e.shiftKey) e.preventDefault(); });  // no text selection
   t.el.addEventListener('click', e => {
     const all = e.target.closest('[data-all]');
-    if (all) { t.rows.forEach((_, id) => all.checked ? t.sel.add(id) : t.sel.delete(id)); paint(t); return; }
+    if (all) { all.checked ? t.selectAll() : t.unselect(); return; }
     const tr = e.target.closest('tbody tr[data-id]');
     if (!tr) return;
-    const id = tr.dataset.id;
-    if (e.target.matches('input[type=checkbox]') || e.ctrlKey) t.sel.has(id) ? t.sel.delete(id) : t.sel.add(id);
-    else { t.sel.clear(); t.sel.add(id); }
+    const id = tr.dataset.id, add = e.ctrlKey || e.metaKey || e.target.matches('input[type=checkbox]');
+    if (e.shiftKey && t.anchor && t.rows.has(t.anchor)) {
+      const ids = order();
+      let [a, b] = [ids.indexOf(t.anchor), ids.indexOf(id)].sort((x, y) => x - y);
+      if (!add) t.sel.clear();
+      ids.slice(a, b + 1).forEach(x => t.sel.add(x));
+    } else if (add) {
+      t.sel.has(id) ? t.sel.delete(id) : t.sel.add(id);
+      t.anchor = id;
+    } else {
+      t.sel.clear(); t.sel.add(id);
+      t.anchor = id;
+    }
     paint(t);
+    wrap.focus({preventScroll: true});
   });
+  wrap.tabIndex = 0;
+  wrap.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); t.selectAll(); }
+    else if (e.key === 'Escape') t.unselect();
+  });
+  t.selectAll = () => { t.rows.forEach((_, id) => t.sel.add(id)); paint(t); };
+  t.unselect = () => { t.sel.clear(); t.anchor = null; paint(t); };
   t.el.addEventListener('dblclick', e => { const tr = e.target.closest('tbody tr[data-id]'); if (tr && onOpen) onOpen(tr.dataset.id); });
   t.render = () => {
     if (!t.rows.size) {
@@ -349,8 +374,16 @@ function paint(t) {
     tr.classList.toggle('sel', on);
     $('input', tr).checked = on;
   });
-  const all = $('[data-all]', t.el);
-  all.checked = t.rows.size > 0 && t.sel.size === t.rows.size;
+  const all = $('[data-all]', t.el), n = t.selected().length;
+  all.checked = t.rows.size > 0 && n === t.rows.size;
+  all.indeterminate = n > 0 && n < t.rows.size;
+  updateEnqueueLabel();
+}
+function updateEnqueueLabel() {
+  const t = tab === 'captured' ? tables.captured : tables.found;
+  const n = t ? t.selected().length : 0;
+  const b = document.getElementById('enqueue');
+  if (b) b.textContent = '選んだ動画をダウンロードに追加' + (n ? `（${n} 件）` : '');
 }
 
 const found = makeTable('found', 6, () => enqueue('found'));
@@ -382,13 +415,13 @@ function jobRow(v) {
 }
 
 // ---- tabs (the browser is a real window laid over #browser-slot)
-let tab = 'found';
 function showTab(name) {
   tab = name;
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
   document.querySelectorAll('section.view').forEach(s => s.classList.toggle('on', s.dataset.view === name));
   send('tab', {name});
   reportSlot();
+  updateEnqueueLabel();
 }
 $('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) showTab(b.dataset.tab); });
 function reportSlot() {
@@ -412,6 +445,7 @@ function enqueue(from) {
   const ids = t.selected();
   if (!ids.length) { toast(from === 'captured' ? '一覧から動画を選んでください' : '「見つかった動画」から動画を選んでください'); showTab(from); return; }
   send('enqueue', {from, ids});
+  t.unselect();  // done with this selection
 }
 $('#enqueue').onclick = () => enqueue(tab === 'captured' ? 'captured' : 'found');
 const CONFIRM = {  // acts that delete files ask first
@@ -421,7 +455,7 @@ const CONFIRM = {  // acts that delete files ask first
 };
 document.querySelectorAll('[data-queue-actions] [data-act]').forEach(b => b.onclick = () => {
   const act = b.dataset.act, ids = act === 'clear' ? [] : queue.selected();
-  const go = () => send(act, act === 'clear' ? {} : {ids});
+  const go = () => { send(act, act === 'clear' ? {} : {ids}); queue.unselect(); };
   if (CONFIRM[act]) ask(...CONFIRM[act](ids), go); else go();
 });
 $('#open-folder').onclick = () => send('openFolder', {id: queue.selected()[0] || null});
@@ -483,7 +517,7 @@ const handlers = {
   found(m) {
     found.rows.clear(); found.sel.clear();
     for (const v of m.items) found.rows.set(v.id, foundRow(v));
-    if (m.items.length) found.sel.add(m.items[0].id);
+    found.anchor = null;
     found.render();
   },
   capturedRemove(m) {
@@ -521,6 +555,13 @@ const handlers = {
 window.chrome?.webview?.addEventListener('message', e => handlers[e.data.type]?.(e.data));
 // for tests: what the page shows
 window.mvdlView = () => ({tab, found: found.rows.size, captured: captured.rows.size, queue: queue.rows.size});
+// for tests: click rows of a table the way a person would (index, modifier keys) and read the selection
+window.mvdlClick = (name, i, keys = {}) => {
+  const tr = tables[name].el.querySelectorAll('tbody tr[data-id]')[i];
+  const target = keys.checkbox ? tr.querySelector('input') : tr.cells[1];
+  target.dispatchEvent(new MouseEvent('click', {bubbles: true, shiftKey: !!keys.shift, ctrlKey: !!keys.ctrl}));
+  return tables[name].el.querySelectorAll('tbody tr.sel').length;
+};
 send('ready');
 </script>
 </body>
