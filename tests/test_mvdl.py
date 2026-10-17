@@ -54,6 +54,8 @@ FILES = {  # path -> (content-type, body)
     '/media/aes.m3u8': (HLS, b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n#EXTINF:4.0,\nseg0.ts\n#EXT-X-ENDLIST\n'),
     '/media/radio.m3u8': (HLS, b'#EXTM3U\n#EXTINF:10.0,\nseg0.aac\n#EXT-X-ENDLIST\n'),
     '/media/voice.mp4': ('audio/mp4', AUDIO_MP4),
+    # no extension and no useful Content-Type: yt-dlp cannot tell the format
+    '/media/stream': ('application/octet-stream', VIDEO),
 }
 
 PAGES = {
@@ -295,3 +297,29 @@ def test_hls_media_playlists_judged_by_the_playlist(server, check_mode):
     assert {c.url.rsplit('/', 1)[1]: c.duration for c in found} == {'aes.m3u8': 4.0, 'disguised.m3u8': 12.0,
                                                                      'fmp4.m3u8': 4.0}
     assert all(c.source == 'ブラウザ' for c in found)
+
+
+def test_download_without_known_format_gets_real_extension(server, tmp_path):
+    """URL without an extension, served as octet-stream: saved as .mp4, not .unknown_video."""
+    c = Candidate(server + '/media/stream?token=1', 'No ext', 'mp4', 'ブラウザ', {})
+    files = download(c, str(tmp_path), '最高画質', print)
+    assert [os.path.basename(f) for f in files] == ['No ext.mp4']
+    assert os.listdir(tmp_path) == ['No ext.mp4']
+    assert open(files[0], 'rb').read() == VIDEO
+
+
+def test_container_of(tmp_path):
+    from mvdl.downloader import container_of
+    cases = {
+        'mp4': b'\x00\x00\x00\x18ftypisom' + b'\x00' * 16,
+        'mov': b'\x00\x00\x00\x14ftypqt  ' + b'\x00' * 16,
+        'webm': b'\x1aE\xdf\xa3\x9fB\x86\x81\x01B\xf7\x81\x01B\xf2\x81\x04B\xf3\x81\x08B\x82\x84webm',
+        'mkv': b'\x1aE\xdf\xa3\xa3B\x86\x81\x01B\x82\x88matroska',
+        'flv': b'FLV\x01\x05' + b'\x00' * 16,
+        'ts': (b'\x47' + b'\x00' * 187) * 3,
+        None: b'#EXTM3U\n#EXTINF:4.0,\nseg.ts\n',
+    }
+    for want, head in cases.items():
+        f = tmp_path / f'x{want}'
+        f.write_bytes(head)
+        assert container_of(str(f)) == want, want

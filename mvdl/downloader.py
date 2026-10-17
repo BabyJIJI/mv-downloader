@@ -28,6 +28,47 @@ class Cancelled(Exception):
     pass
 
 
+def container_of(path):
+    """The real container of a file, from its first bytes: 'mp4', 'webm', ... or None."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(4096)
+    except OSError:
+        return None
+    if head[4:8] == b'ftyp':
+        brand = head[8:12]
+        return 'mov' if brand == b'qt  ' else 'm4a' if brand in (b'M4A ', b'M4B ') else 'mp4'
+    if head[4:8] in (b'moov', b'mdat', b'wide', b'free'):
+        return 'mov'
+    if head[:4] == b'\x1aE\xdf\xa3':  # EBML
+        return 'webm' if b'webm' in head[:64] else 'mkv'
+    if head[:3] == b'FLV':
+        return 'flv'
+    if head[:4] == b'RIFF' and head[8:12] == b'AVI ':
+        return 'avi'
+    if len(head) > 376 and head[0] == head[188] == head[376] == 0x47:  # MPEG-TS sync bytes
+        return 'ts'
+    return None
+
+
+def fix_extension(path, log):
+    """yt-dlp names a file "*.unknown_video" when neither the URL nor the Content-Type (octet-stream, or
+    none) tells the format; the file itself is fine. Give it the extension of what it really is."""
+    root, ext = os.path.splitext(path)
+    if ext.lower() not in ('.unknown_video', '') or not os.path.isfile(path):
+        return path
+    real = container_of(path)
+    if not real:
+        log(f'形式が分からないため、拡張子を付けられませんでした: {os.path.basename(path)}')
+        return path
+    new, n = f'{root}.{real}', 2
+    while os.path.exists(new):
+        new, n = f'{root} ({n}).{real}', n + 1
+    os.replace(path, new)
+    log(f'拡張子を付けました: {os.path.basename(new)}')
+    return new
+
+
 def download(cand: Candidate, outdir, quality, log, progress=None, stop=None, on_file=None):
     """progress(fraction or None, text); on_file(name) for each file yt-dlp writes (its partials are
     name.part etc.). Returns the saved file paths."""
@@ -94,5 +135,5 @@ def download(cand: Candidate, outdir, quality, log, progress=None, stop=None, on
         for d in info.get('requested_downloads') or [info]:
             if d.get('filepath'):
                 files.append(d['filepath'])
-    return list(dict.fromkeys(files))
+    return [fix_extension(p, log) for p in dict.fromkeys(files)]
 
