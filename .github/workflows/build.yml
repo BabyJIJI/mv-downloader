@@ -38,8 +38,8 @@ jobs:
         env:
           MVDL_SHOTS: ${{ runner.temp }}/shots
       - uses: actions/upload-artifact@v4
-        if: always()
-        continue-on-error: true  # the account's artifact storage can be full; not worth failing the build
+        if: failure()  # only to look into a failed run; artifacts count against the storage quota
+        continue-on-error: true
         with:
           name: screenshots
           path: ${{ runner.temp }}/shots
@@ -52,12 +52,6 @@ jobs:
           if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'mvdl.exe did not finish starting' }
           if (-not (Test-Path $env:MVDL_STARTUP_CHECK)) { throw "mvdl.exe exited ($($p.ExitCode)) before its browser came up" }
           "WebView2: $(Get-Content $env:MVDL_STARTUP_CHECK)"
-      - uses: actions/upload-artifact@v4
-        continue-on-error: true  # releases carry the zip anyway
-        with:
-          name: mvdl-win64
-          path: dist/mvdl-win64.zip
-          retention-days: 7
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
