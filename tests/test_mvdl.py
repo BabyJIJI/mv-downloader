@@ -323,3 +323,80 @@ def test_container_of(tmp_path):
         f = tmp_path / f'x{want}'
         f.write_bytes(head)
         assert container_of(str(f)) == want, want
+
+
+class _Resume(http.server.BaseHTTPRequestHandler):
+    """First 'drop' (promise the whole file, send half, hang up), then '416' (refuse any Range)."""
+    mode = 'drop'
+    data = b'\x00\x00\x00\x18ftypmp42' + bytes(range(256)) * 2000
+
+    def log_message(self, *a):
+        pass
+
+    def do_HEAD(self):
+        self.do_GET(body=False)
+
+    def do_GET(self, body=True):
+        n = len(self.data)
+        if self.mode == 'drop':
+            self.send_response(200)
+            self.send_header('Content-Type', 'video/mp4')
+            self.send_header('Content-Length', str(n))
+            self.end_headers()
+            if body:
+                self.wfile.write(self.data[:n // 2])
+            self.close_connection = True
+            return
+        if self.headers.get('Range'):
+            self.send_response(416)
+            self.send_header('Content-Range', f'bytes */{n}')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', 'video/mp4')
+        self.send_header('Content-Length', str(n))
+        self.end_headers()
+        if body:
+            self.wfile.write(self.data)
+
+
+def test_retry_starts_over_when_server_refuses_resume(tmp_path):
+    """A failed download left a .part; the server answers the resume with 416: start that file over."""
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Resume)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    c = Candidate(f'http://127.0.0.1:{srv.server_port}/v.mp4', 'Resume', 'mp4', 'ブラウザ', {})
+    try:
+        _Resume.mode = 'drop'
+        with pytest.raises(Exception):
+            download(c, str(tmp_path), '最高画質', print)
+        assert os.listdir(tmp_path) == ['Resume.mp4.part']
+        _Resume.mode = '416'
+        files = download(c, str(tmp_path), '最高画質', print)
+        assert os.listdir(tmp_path) == ['Resume.mp4']
+        assert open(files[0], 'rb').read() == _Resume.data
+    finally:
+        srv.shutdown()
+
+
+def test_no_file_is_not_done(tmp_path, monkeypatch):
+    """yt-dlp returning without an error is not enough: the file has to be there."""
+    import yt_dlp
+
+    from mvdl.downloader import Incomplete
+    (tmp_path / 'X.mp4.part').write_bytes(b'half')
+    monkeypatch.setattr(yt_dlp.YoutubeDL, 'extract_info', lambda self, url, download: {
+        'requested_downloads': [{'filepath': str(tmp_path / 'X.mp4')}]})
+    c = Candidate('http://example.invalid/x.mp4', 'X', 'mp4', 'ブラウザ', {})
+    with pytest.raises(Incomplete):
+        download(c, str(tmp_path), '最高画質', print)
+
+
+def test_partials_never_include_finished_files(tmp_path):
+    from mvdl.jobs import partial_files
+    names = ['Movie.final.mp4', 'Clip.fhd.mp4', 'Merged.f137.mp4', 'Merged.f299-1.mp4']
+    for n in names:
+        (tmp_path / n).write_bytes(b'x')
+    (tmp_path / 'Movie.final.mp4.part').write_bytes(b'x')
+    got = sorted(os.path.basename(p) for p in partial_files([str(tmp_path / n) for n in names]))
+    assert got == ['Merged.f137.mp4', 'Merged.f299-1.mp4', 'Movie.final.mp4.part']

@@ -1,10 +1,12 @@
 """Download one Candidate with yt-dlp."""
+import glob
 import os
 
 import yt_dlp
 from yt_dlp.utils import sanitize_filename
 
 from .finder import Candidate, Logger, fmt_size
+from .jobs import partial_files, remove_partials
 from .tools import find_tool, ydl_base_opts
 
 QUALITIES = {
@@ -26,6 +28,10 @@ SINGLE_FILE = {
 
 class Cancelled(Exception):
     pass
+
+
+class Incomplete(Exception):
+    """yt-dlp returned without an error, but the file is not there (only partial files, or nothing)."""
 
 
 def container_of(path):
@@ -83,9 +89,11 @@ def download(cand: Candidate, outdir, quality, log, progress=None, stop=None, on
     else:  # direct media URL: name it after the page instead of the file on the CDN
         name = sanitize_filename(cand.title, restricted=False)[:150].replace('%', '%%') + '.%(ext)s'
 
-    files = []
+    files, seen = [], []  # finished files; every file name yt-dlp worked on
 
     def hook(d):
+        if d.get('filename') and d['filename'] not in seen:
+            seen.append(d['filename'])
         if on_file and d.get('filename'):
             on_file(d['filename'])
         if stop is not None and stop.is_set():
@@ -124,9 +132,34 @@ def download(cand: Candidate, outdir, quality, log, progress=None, stop=None, on
     if cand.headers:
         opts['http_headers'] = dict(cand.headers)
     os.makedirs(outdir, exist_ok=True)
-    try:
+
+    def run():
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(cand.url, download=True)
+            return ydl.extract_info(cand.url, download=True)
+
+    def our_partials():
+        """The partial files of this download. The 416 comes on the first request of the resume, before
+        any progress names the file, so ask yt-dlp for the name (no download)."""
+        names = list(seen)
+        with yt_dlp.YoutubeDL(opts | {'progress_hooks': [], 'postprocessor_hooks': []}) as ydl:
+            base = os.path.splitext(ydl.prepare_filename(ydl.extract_info(cand.url, download=False)))[0]
+        # the file itself, and the single formats of a merged download ("Title.f137.mp4")
+        names += glob.glob(glob.escape(base) + '.*.part') + glob.glob(glob.escape(base) + '.*.ytdl')
+        return [n[:-5] if n.endswith(('.part', '.ytdl')) else n for n in names]
+
+    try:
+        try:
+            info = run()
+        except yt_dlp.utils.DownloadError as e:
+            if 'HTTP Error 416' not in str(e):
+                raise
+            names = our_partials()
+            if not partial_files(names):
+                raise
+            # resuming a partial file, but the server refuses ranges: start over (once)
+            log('サーバーが続きからの取得に応じないため、途中のファイルを消して最初から取り直します')
+            remove_partials(names)
+            info = run()
     except Exception:
         if stop is not None and stop.is_set():
             raise Cancelled() from None
@@ -135,5 +168,11 @@ def download(cand: Candidate, outdir, quality, log, progress=None, stop=None, on
         for d in info.get('requested_downloads') or [info]:
             if d.get('filepath'):
                 files.append(d['filepath'])
-    return [fix_extension(p, log) for p in dict.fromkeys(files)]
+    files = [p for p in dict.fromkeys(files) if os.path.isfile(p) and os.path.getsize(p) > 0]
+    if not files:
+        left = partial_files(seen)
+        raise Incomplete('保存が完了していません'
+                         + (f'（途中のファイルだけが残っています: {", ".join(os.path.basename(p) for p in left)}）'
+                            if left else '（ファイルが作られませんでした）'))
+    return [fix_extension(p, log) for p in files]
 

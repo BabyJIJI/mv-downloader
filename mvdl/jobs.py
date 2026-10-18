@@ -74,8 +74,9 @@ def load_queue(path):
     return jobs
 
 
-# a single format of a download that is merged afterwards: "Title.f137.mp4" (deleted with the partials)
-FORMAT_PART = re.compile(r'\.f[\w-]+\.\w+$')
+# a single format of a download that is merged afterwards: "Title.f137.mp4", "Title.f299-1.mp4"
+# (deleted with the partials). Digits right after ".f", so "Title.final.mp4" is never taken for one.
+FORMAT_PART = re.compile(r'\.f\d[\w-]*\.\w+$')
 
 
 def partial_files(names):
