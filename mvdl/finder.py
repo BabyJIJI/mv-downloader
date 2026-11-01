@@ -1,8 +1,10 @@
 """Find the videos on a page.
 
 - yt-dlp (dedicated extractors for ~1800 sites, plus its generic one)
-- our own scan of the HTML: <video>/<source>, og:video, media URLs inside scripts, and iframes
-  that yt-dlp has an extractor for (YouTube / Vimeo embeds, ...)
+- our own scan of the HTML: <video>/<source>, og:video, media URLs inside scripts (also packed
+  `eval(function(p,a,c,k,e,d)...)` ones and player configs like `file: "https://..."`), iframes that
+  yt-dlp has an extractor for (YouTube / Vimeo embeds, ...), and the other iframes (player pages of
+  hosts yt-dlp does not know), whose HTML is scanned the same way
 - (capture.py) the media requests the built-in browser made while the user watched the page
 """
 import html.parser
@@ -21,6 +23,18 @@ VIDEO_EXT = ('mp4', 'm4v', 'mov', 'webm', 'mkv', 'flv', 'ts', '3gp', 'avi', 'wmv
 MEDIA_URL_RE = re.compile(
     r'''(?:https?:)?//[^\s"'<>()\\]+?\.(?:%s)(?:\?[^\s"'<>()\\]*)?(?=["'\s<>()\\]|$)''' % '|'.join(MEDIA_EXT),
     re.I)
+# player configs (JW Player, Video.js, Plyr, Clappr, ...) often give the stream without an extension:
+# `file: "https://host/stream/abc"`, `"hls":"..."`. Only these keys, so ordinary links are not probed.
+PLAYER_KEYS = ('file', 'src', 'source', 'hls', 'hlsurl', 'hls_url', 'm3u8', 'video', 'videourl', 'video_url',
+               'stream', 'streamurl', 'stream_url', 'playlist', 'mp4', 'contenturl')
+PLAYER_URL_RE = re.compile(
+    r'''["']?\b(?:%s)["']?\s*[:=]\s*["']((?:https?:)?//[^\s"'<>\\]+)["']''' % '|'.join(PLAYER_KEYS), re.I)
+# never a video: not worth a check
+NOT_MEDIA_EXT = ('js', 'css', 'json', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'woff', 'woff2', 'ttf',
+                 'vtt', 'srt', 'ass', 'xml', 'txt', 'html', 'htm', 'mp3', 'aac', 'm4a', 'ogg', 'opus', 'wav')
+PACKED_RE = re.compile(r'''eval\(function\(p,a,c,k,e,[rd]\).*?\.split\(['"]\|['"]\)[^)]*\)\)''', re.S)
+MAX_FRAMES = 8        # player pages followed per search
+MAX_FRAME_DEPTH = 2   # a page -> its player iframe -> the iframe inside that
 
 
 @dataclass
@@ -238,10 +252,10 @@ class _PageParser(html.parser.HTMLParser):
             self.title = data.strip()
 
 
-def fetch_page(url, log):
+def fetch_page(url, log, headers=None):
     """GET the page with yt-dlp's networking (same UA / proxy handling as the download)."""
     with yt_dlp.YoutubeDL(ydl_base_opts(Logger(log))) as ydl:
-        with ydl.urlopen(Request(url)) as r:
+        with ydl.urlopen(Request(url, headers=dict(headers or {}))) as r:
             body = r.read(20 * 1024 * 1024)
             charset = r.headers.get_content_charset() if hasattr(r.headers, 'get_content_charset') else None
             final = r.url
@@ -278,17 +292,57 @@ def find_in_html(url, log):
     return _checked(scan_html(text, final, log, {'Referer': final}), log)
 
 
-def scan_html(text, page_url, log, headers):
-    """Media URLs in an HTML document (<video>, og:video, URLs inside scripts) and the embedded players
-    yt-dlp knows (YouTube / Vimeo iframes, ...). Not checked yet: see _checked()."""
+def unpack_scripts(text):
+    """The page text plus what its obfuscation hides: JSON-escaped slashes, \\u002F / \\x2F escapes, and
+    Dean Edwards packed scripts (`eval(function(p,a,c,k,e,d){...})`, common on player hosts)."""
+    from yt_dlp.utils import decode_packed_codes
+    parts = [text]
+    for m in PACKED_RE.finditer(text):
+        try:
+            parts.append(decode_packed_codes(m.group(0)).replace("\\'", "'"))
+        except Exception:  # noqa: BLE001 - not the usual packer format
+            pass
+    out = '\n'.join(parts)
+    out = re.sub(r'\\(?:u002[fF]|x2[fF])', '/', out)
+    return out.replace('\\/', '/')
+
+
+def _ext(url):
+    last = urllib.parse.urlparse(url).path.rsplit('/', 1)[-1]
+    return last.rsplit('.', 1)[-1].lower() if '.' in last else ''
+
+
+def _same_site(a, b):
+    ha, hb = urllib.parse.urlparse(a).hostname or '', urllib.parse.urlparse(b).hostname or ''
+    return ha == hb or ha.endswith('.' + hb) or hb.endswith('.' + ha)
+
+
+def _frame_headers(headers, page_url, frame_url):
+    """Headers to load a player iframe the way the browser does: the page as Referer, its cookies only
+    when the iframe is on the same site."""
+    h = {k: v for k, v in headers.items() if k.lower() not in ('cookie', 'referer')}
+    if headers.get('Cookie') and _same_site(page_url, frame_url):
+        h['Cookie'] = headers['Cookie']
+    return h | {'Referer': page_url}
+
+
+def scan_html(text, page_url, log, headers, title=None, _state=None):
+    """Media URLs in an HTML document (<video>, og:video, URLs inside scripts, player configs) and the
+    embedded players: those yt-dlp knows (YouTube / Vimeo iframes, ...) go to yt-dlp, the other iframes
+    are loaded and scanned the same way (up to MAX_FRAMES, MAX_FRAME_DEPTH deep). Not checked yet: see
+    _checked()."""
+    state = _state if _state is not None else {'seen': set(), 'frames': 0, 'depth': 0}
+    seen = state['seen']
     p = _PageParser()
     try:
         p.feed(text)
     except Exception:  # noqa: BLE001 - broken HTML; the regex scan below still runs
         pass
-    title = p.title or page_url
-    found = [*p.media, *MEDIA_URL_RE.findall(text.replace('\\/', '/'))]
-    seen, out = set(), []
+    title = title or p.title or page_url
+    script = unpack_scripts(text)
+    found = [*p.media, *MEDIA_URL_RE.findall(script)]
+    found += [u for u in PLAYER_URL_RE.findall(script) if _ext(u) not in NOT_MEDIA_EXT]
+    out = []
     for raw in found:
         u = urllib.parse.urljoin(page_url, raw.strip())
         if not u.startswith('http') or u in seen or has_site_extractor(u):
@@ -297,11 +351,35 @@ def scan_html(text, page_url, log, headers):
         out.append(Candidate(u, title, kind_of(u), 'ページ内', dict(headers)))
     for raw in p.iframes:
         u = urllib.parse.urljoin(page_url, raw.strip())
-        if u in seen or not u.startswith('http') or not has_site_extractor(u):
+        if u in seen or not u.startswith('http'):
             continue
         seen.add(u)
-        log(f'埋め込みプレーヤーを調べています: {u}')
-        out += find_with_ytdlp(u, log, {'Referer': page_url})
+        if has_site_extractor(u):
+            log(f'埋め込みプレーヤーを調べています: {u}')
+            out += find_with_ytdlp(u, log, {'Referer': page_url})
+            continue
+        if _ext(u) in MEDIA_EXT or _ext(u) in NOT_MEDIA_EXT and _ext(u) not in ('html', 'htm'):
+            continue  # a media file is in the list above already; images / scripts are no player
+        if state['depth'] >= MAX_FRAME_DEPTH or state['frames'] >= MAX_FRAMES:
+            log(f'埋め込みページが多い（深い）ので、これ以上は開きません: {u}')
+            continue
+        state['frames'] += 1
+        log(f'埋め込みページを調べています: {u}')
+        h = _frame_headers(headers, page_url, u)
+        try:
+            frame_text, final = fetch_page(u, log, h)
+        except Exception as e:  # noqa: BLE001 - this player only; the rest of the page still counts
+            log(f'埋め込みページを読み込めませんでした: {u}（{_short(e)}）')
+            continue
+        state['depth'] += 1
+        try:
+            # what the player page loads is requested with it as Referer (player hosts check that)
+            in_frame = scan_html(frame_text, final, log, h | {'Referer': final}, title, state)
+        finally:
+            state['depth'] -= 1
+        if not in_frame:
+            log(f'埋め込みページに動画の URL は見つかりませんでした: {u}')
+        out += in_frame
     return out
 
 

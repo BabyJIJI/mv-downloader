@@ -158,10 +158,23 @@ def _check_file(c, log):
     return None
 
 
+def _is_hls(c, log):
+    """An HLS playlist behind a URL whose extension does not say so (`/stream/abc`, `.php?id=`, `.txt`)."""
+    path = urllib.parse.urlparse(c.url).path.lower()
+    last = path.rsplit('/', 1)[-1]
+    if '.' in last and last.rsplit('.', 1)[-1] in ('mp4', 'm4v', 'mov', 'webm', 'mkv', 'flv'):
+        return False
+    ctype, body, _total = _get(c.url, c.headers, 1024, log, rng=True)
+    return ctype in ('application/vnd.apple.mpegurl', 'application/x-mpegurl', 'audio/mpegurl') \
+        or body.lstrip(b'\xef\xbb\xbf \r\n').startswith(b'#EXTM3U')
+
+
 def check(c, log):
     """(Candidate with resolution / duration / size filled in, or None if it is not a video;
     contained playlist URLs)."""
     try:
+        if c.kind not in ('HLS', 'DASH') and _is_hls(c, log):  # a player's stream URL without .m3u8
+            c.kind = 'HLS'
         if c.kind == 'HLS':
             info, children = _check_hls(c, log)
         else:

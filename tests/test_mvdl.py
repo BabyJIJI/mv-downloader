@@ -56,7 +56,11 @@ FILES = {  # path -> (content-type, body)
     '/media/voice.mp4': ('audio/mp4', AUDIO_MP4),
     # no extension and no useful Content-Type: yt-dlp cannot tell the format
     '/media/stream': ('application/octet-stream', VIDEO),
+    # an HLS master behind a URL without .m3u8, sent as text/plain
+    '/media/hlsstream': ('text/plain', MASTER),
 }
+PACKED = (b"eval(function(p,a,c,k,e,d){while(c--)if(k[c])p=p.replace(new RegExp('\\\\b'+c.toString(a)+'\\\\b','g'),"
+          b"k[c]);return p}('0={1:\\'2://3/4/5\\'};',10,6,'cfg|file|http|HOST|media|hlsstream'.split('|'),0,{}))")
 
 PAGES = {
     '/video-tag.html': b'<html><head><title>Video tag</title></head><body>'
@@ -77,6 +81,18 @@ PAGES = {
     '/av.html': b'<html><head><title>AV</title></head><body>'
                 b'<video src="/media/clip.mp4"></video><audio src="/media/voice.mp4"></audio></body></html>',
     '/empty.html': b'<html><head><title>Nothing</title></head><body><p>no video</p></body></html>',
+    # the video page only embeds a player page (a host yt-dlp does not know)
+    '/outer.html': b'<html><head><title>Outer</title></head><body>'
+                   b'<iframe src="/player.html"></iframe><iframe src="/missing.html"></iframe></body></html>',
+    # the player page: the stream in a packed script, a player config without extensions
+    '/player.html': b'<html><head><title>Player</title></head><body><script>' + PACKED + b'</script>'
+                    b'<script>jwplayer("p").setup({sources: [{file: "http://HOST/media/guarded"}],'
+                    b' image: "http://HOST/media/poster.jpg"});</script></body></html>',
+    # iframes inside iframes: followed MAX_FRAME_DEPTH deep only
+    '/deep1.html': b'<html><title>Deep</title><iframe src="/deep2.html"></iframe></html>',
+    '/deep2.html': b'<html><iframe src="/deep3.html"></iframe></html>',
+    '/deep3.html': b'<html><video src="/media/clip.mp4"></video><iframe src="/deep4.html"></iframe></html>',
+    '/deep4.html': b'<html><video src="/media/stream"></video></html>',
 }
 
 SEEN_HEADERS = []
@@ -107,6 +123,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == '/media/browser-only.mp4':  # refuses anyone but the browser
             self.send_error(403)
             return
+        if path == '/media/guarded':  # player hosts: only for requests from their own player page
+            if not (self.headers.get('Referer') or '').endswith('/player.html'):
+                self.send_error(403)
+                return
+            path = '/media/stream'
         if path in PAGES:
             data, ctype = PAGES[path].replace(b'HOST', self.headers['Host'].encode()), 'text/html; charset=utf-8'
         elif path in FILES:
@@ -186,6 +207,46 @@ def test_only_videos_listed(server, check_mode):
     master = next(c for c in found if c.kind == 'HLS')
     # 2 Mbps (best variant) x 4 s
     assert (master.resolution, master.duration, master.size, master.size_approx) == ('1280×720', 4.0, 1_000_000, True)
+
+
+def test_unpack_scripts():
+    from mvdl.finder import unpack_scripts
+    text = unpack_scripts(PACKED.decode().replace('HOST', 'cdn.example') + ' "a":"https:\\u002F\\u002Fx\\/y.mp4"')
+    assert "cfg={file:'http://cdn.example/media/hlsstream'};" in text
+    assert '"https://x/y.mp4"' in text
+
+
+def test_player_iframe_followed(server, check_mode):
+    """A page whose video is in a player iframe: the player page is loaded and scanned (packed script,
+    player config), and its media get it as Referer."""
+    logs = []
+    found = find_in_html(server + '/outer.html', logs.append)
+    assert sorted((c.url, c.kind) for c in found) == [(server + '/media/guarded', '動画'),
+                                                      (server + '/media/hlsstream', 'HLS')]
+    assert all(c.title == 'Outer' and c.headers['Referer'] == server + '/player.html' for c in found)
+    hls = next(c for c in found if c.kind == 'HLS')
+    assert (hls.resolution, hls.size) == ('1280×720', 1_000_000)
+    assert any('埋め込みページを読み込めませんでした' in m and '/missing.html' in m for m in logs)
+
+
+def test_player_iframe_from_browser_dom(server, check_mode):
+    dom = '<html><title>DOM</title><iframe src="/player.html"></iframe></html>'
+    found = find_in_page(server + '/watch', 'Watch', dom, [], {'User-Agent': 'UA', 'Cookie': 'k=v'}, print)
+    assert sorted(c.url for c in found) == [server + '/media/guarded', server + '/media/hlsstream']
+    assert all(c.title == 'DOM' for c in found)  # the top page's title, not the player's
+
+
+def test_iframes_followed_only_so_deep(server, check_mode):
+    found = find_in_html(server + '/deep1.html', print)
+    assert [c.url for c in found] == [server + '/media/clip.mp4']
+
+
+def test_frame_headers_keep_cookies_on_the_site():
+    from mvdl.finder import _frame_headers
+    h = {'User-Agent': 'UA', 'Cookie': 'k=v', 'Referer': 'x'}
+    assert _frame_headers(h, 'https://www.site.com/v/1', 'https://player.other.net/e/2') == {
+        'User-Agent': 'UA', 'Referer': 'https://www.site.com/v/1'}
+    assert _frame_headers(h, 'https://www.site.com/v/1', 'https://site.com/e/2')['Cookie'] == 'k=v'
 
 
 def test_fmt_resolution_duration():
