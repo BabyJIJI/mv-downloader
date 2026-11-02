@@ -74,7 +74,7 @@ Web ページに埋め込まれた動画を保存する Windows 用の GUI ツ�
 
 ## ビルド
 
-GitHub に push すると Actions（`.github/workflows/build.yml`）が、テスト（Linux）→ 実際のウィンドウでの動作確認（Windows、WebView2）→ exe のビルド → exe の起動確認、を行う。`v*` のタグを push すると Release に zip と exe を載せる。
+GitHub に push すると Actions（`.github/workflows/build.yml`）が、テスト（Linux）→ 実際のウィンドウでの動作確認（Windows、WebView2）→ exe のビルド → exe の起動確認、を行う。main で `mvdl/__init__.py` のバージョンを上げると、そのバージョンの Release（タグ `v<バージョン>`）がまだ無ければ、ビルドが通った後に Release を作って zip と exe を載せる（タグも Actions が作る）。`v*` のタグを push しても同じように Release に載せる。
 
 ```bash
 git tag v0.5.0 && git push origin v0.5.0

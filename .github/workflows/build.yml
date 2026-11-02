@@ -52,15 +52,35 @@ jobs:
           if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'mvdl.exe did not finish starting' }
           if (-not (Test-Path $env:MVDL_STARTUP_CHECK)) { throw "mvdl.exe exited ($($p.ExitCode)) before its browser came up" }
           "WebView2: $(Get-Content $env:MVDL_STARTUP_CHECK)"
-      - name: Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Which release (a v* tag, or a version on main that has no release yet)
+        id: rel
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # a release made on GitHub first (which also makes the tag) only gets the files
-          gh release view ${{ github.ref_name }} *> $null
+          $tag = ''
+          if ('${{ github.ref }}'.StartsWith('refs/tags/v')) {
+            $tag = '${{ github.ref_name }}'
+          } elseif ('${{ github.event_name }}' -eq 'push' -and '${{ github.ref }}' -eq 'refs/heads/main') {
+            $v = (Select-String -Path mvdl/__init__.py -Pattern "__version__ = '([^']+)'").Matches[0].Groups[1].Value
+            gh api "repos/${{ github.repository }}/git/ref/tags/v$v" *> $null
+            if ($LASTEXITCODE -eq 0) { "v$v is released already" } else { $tag = "v$v" }
+          }
+          "release: '$tag'"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          $global:LASTEXITCODE = 0
+      - name: Release
+        if: steps.rel.outputs.tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          # a release made on GitHub first (which also makes the tag) only gets the files;
+          # otherwise the release makes the tag, on this commit
+          gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload ${{ github.ref_name }} dist/mvdl-win64.zip dist/mvdl.exe --clobber
+            gh release upload $env:TAG dist/mvdl-win64.zip dist/mvdl.exe --clobber
           } else {
-            gh release create ${{ github.ref_name }} dist/mvdl-win64.zip dist/mvdl.exe --title ${{ github.ref_name }} --generate-notes
+            gh release create $env:TAG dist/mvdl-win64.zip dist/mvdl.exe --title $env:TAG --target ${{ github.sha }} --generate-notes
           }
