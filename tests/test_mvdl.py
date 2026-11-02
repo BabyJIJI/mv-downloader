@@ -9,7 +9,8 @@ import pytest
 
 from mvdl.capture import Capture, is_media
 from mvdl.downloader import download
-from mvdl.finder import Blocked, Candidate, find_in_html, find_in_page, find_videos, find_with_ytdlp, kind_of
+from mvdl.finder import (Blocked, Candidate, NeedsBrowser, decode_link, find_in_html, find_in_page, find_videos,
+                         find_with_ytdlp, kind_of, split_links)
 
 
 def _make_media():
@@ -93,6 +94,35 @@ PAGES = {
     '/deep2.html': b'<html><iframe src="/deep3.html"></iframe></html>',
     '/deep3.html': b'<html><video src="/media/clip.mp4"></video><iframe src="/deep4.html"></iframe></html>',
     '/deep4.html': b'<html><video src="/media/stream"></video></html>',
+    # server buttons whose player URL is encrypted: the site's script asks its server on click (like the
+    # page in the issue: btn-server data-link="hex", a play button that puts the player <iframe> in)
+    '/servers.html': b'<html><head><title>Servers</title></head><body>'
+                     b'<iframe src="/ad.html"></iframe>'
+                     b'<div id="player-wrap"><div id="vserver" class="play-button">play</div></div>'
+                     b'<div class="btns"><span class="btn-title">SERVER : </span>'
+                     b'<a href="javascript:;" class="btn-server active" data-link="3bba8580ed78c8d9f27876a5435bb7ae89b0">EVS</a>'
+                     b'<a href="javascript:;" class="btn-server" data-link="fb51c82a413ac5f4846ad00080ff826bae26">VOE</a>'
+                     b'<a href="javascript:;" class="btn-server" data-link="773827ac6e2dbc0dcf6160b273bd56661810">DEAD</a>'
+                     b'</div><script>'
+                     b'let opened = false;'
+                     b'const load = b => b.dataset.link.startsWith("7738") ? null : fetch("/api?l=" + b.dataset.link)'
+                     b'  .then(r => r.text()).then(u => { document.getElementById("player-wrap").innerHTML ='
+                     b'  `<iframe src="${u}"></iframe>`; window.open("/popup.html"); });'
+                     b'document.querySelectorAll(".btn-server").forEach(b => b.onclick = () => {'
+                     b'  document.querySelector(".btn-server.active").classList.remove("active");'
+                     b'  b.classList.add("active"); if (opened) load(b); });'
+                     b'document.getElementById("vserver").onclick = () => {'
+                     b'  opened = true; load(document.querySelector(".btn-server.active")); };'
+                     b'</script></body></html>',
+    '/ad.html': b'<html><body>ad</body></html>',
+    '/popup.html': b'<html><body>pop-up ad</body></html>',
+    # server buttons that only hide the URL a little: base64, hex of an <iframe> tag, plain
+    '/servers-plain.html': b'<html><head><title>Plain</title></head><body>'
+                           b'<a data-link="B64">B64</a><button data-embed="HEX">HEX</button></body></html>',
+    # a Streamtape-like player page: the link put together by its script
+    '/split.html': b'<html><body><div id="norobotlink"></div><script>'
+                   b"document.getElementById('norobotlink').innerHTML = '//HOST/media/clip.mp4?id=1&token=' + "
+                   b"('xcdabc').substring(1).substring(2);</script></body></html>",
 }
 
 SEEN_HEADERS = []
@@ -128,8 +158,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_error(403)
                 return
             path = '/media/stream'
-        if path in PAGES:
-            data, ctype = PAGES[path].replace(b'HOST', self.headers['Host'].encode()), 'text/html; charset=utf-8'
+        host = self.headers['Host'].encode()
+        if path == '/api':  # the site's script: an encrypted server -> its player page
+            link = self.path.split('l=', 1)[1]
+            data, ctype = b'http://' + host + (b'/player.html' if link.startswith('3bba') else b'/split.html'), 'text/plain'
+        elif path in PAGES:
+            data = PAGES[path].replace(b'HOST', host)
+            if path == '/servers-plain.html':
+                import base64
+                data = data.replace(b'"B64"', b'"' + base64.b64encode(b'http://' + host + b'/player.html') + b'"')
+                data = data.replace(b'"HEX"', b'"' + ('<iframe src="http://%s/split.html" frameborder=0></iframe>'
+                                                      % host.decode()).encode().hex().encode() + b'"')
+            ctype = 'text/html; charset=utf-8'
         elif path in FILES:
             ctype, data = FILES[path]
         else:
@@ -461,3 +501,75 @@ def test_partials_never_include_finished_files(tmp_path):
     (tmp_path / 'Movie.final.mp4.part').write_bytes(b'x')
     got = sorted(os.path.basename(p) for p in partial_files([str(tmp_path / n) for n in names]))
     assert got == ['Merged.f137.mp4', 'Merged.f299-1.mp4', 'Movie.final.mp4.part']
+
+
+def test_decode_link():
+    import base64
+    url = 'https://player.example/e/abc123'
+    assert decode_link(url) == url
+    assert decode_link(base64.b64encode(url.encode()).decode()) == url
+    assert decode_link(base64.urlsafe_b64encode(url.encode()).decode().rstrip('=')) == url
+    assert decode_link(f'<iframe src="{url}" allowfullscreen></iframe>'.encode().hex()) == url
+    assert decode_link(base64.b64encode(f"<IFRAME SRC='{url}'>".encode()).decode()) == url
+    assert decode_link('3bba8580ed78c8d9f27876a5435bb7ae89b090f4876114474b62023080dc4ed7') is None  # encrypted
+    assert decode_link('12345') is None
+
+
+def test_split_links():
+    text = "document.getElementById('norobotlink').innerHTML = '//st.example/get_video?id=X&token=' + ('xyzTOK').substring(1).substring(2);"
+    assert split_links(text) == ['//st.example/get_video?id=X&token=TOK']
+
+
+def test_encrypted_server_buttons_need_the_browser(server):
+    logs = []
+    with pytest.raises(NeedsBrowser) as e:
+        find_in_html(server + '/servers.html', logs.append)
+    assert e.value.servers == ['EVS', 'VOE', 'DEAD'] and e.value.url == server + '/servers.html'
+    assert any('暗号化' in m for m in logs)
+    with pytest.raises(NeedsBrowser):
+        find_videos(server + '/servers.html', print)
+
+
+def test_readable_server_buttons_followed(server, check_mode):
+    found = find_in_html(server + '/servers-plain.html', print)
+    by_title = sorted((c.title, c.url) for c in found)
+    assert by_title == [('Plain（B64）', server + '/media/guarded'), ('Plain（B64）', server + '/media/hlsstream'),
+                        ('Plain（HEX）', server + '/media/clip.mp4?id=1&token=abc')]
+
+
+def test_players_from_server_buttons(server, check_mode):
+    """What the browser got by pressing the buttons (servers.SCRIPT) is followed first, named by server."""
+    dom = '<html><title>DOM</title>' + ''.join(f'<iframe src="/ad.html?{i}"></iframe>' for i in range(15)) + '</html>'
+    found = find_in_page(server + '/servers.html', 'Servers', dom, [], {'User-Agent': 'UA'}, print,
+                         [('EVS', server + '/player.html'), ('VOE', server + '/split.html')])
+    assert sorted((c.title, c.url) for c in found) == [
+        ('DOM（EVS）', server + '/media/guarded'), ('DOM（EVS）', server + '/media/hlsstream'),
+        ('DOM（VOE）', server + '/media/clip.mp4?id=1&token=abc')]
+
+
+def test_server_script_presses_the_buttons(server):
+    """servers.SCRIPT in a real browser on a page whose players only the site's script opens."""
+    pw = pytest.importorskip('playwright.sync_api')
+    import time
+
+    from mvdl import servers
+    try:
+        p = pw.sync_playwright().start()
+        exe = os.environ.get('MVDL_CHROMIUM')  # a Chromium of another Playwright version
+        browser = p.chromium.launch(**({'executable_path': exe} if exe else {}))
+    except Exception as e:  # noqa: BLE001
+        pytest.skip(f'no browser: {e}')
+    try:
+        page = browser.new_page()
+        page.goto(server + '/servers.html')
+        assert page.evaluate(servers.SCRIPT) == 3
+        deadline = time.time() + 60
+        while not (result := page.evaluate('window.__mvdlServers')).get('done'):
+            assert time.time() < deadline, result
+            time.sleep(0.2)
+        assert servers.players(result) == [('EVS', server + '/player.html'), ('VOE', server + '/split.html')]
+        assert [i['label'] for i in result['items']] == ['EVS', 'VOE', 'DEAD']
+        assert page.evaluate('document.querySelector(".btn-server.active").textContent') == 'EVS'  # put back
+    finally:
+        browser.close()
+        p.stop()

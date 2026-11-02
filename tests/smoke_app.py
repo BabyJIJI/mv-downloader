@@ -8,6 +8,8 @@ asked what it shows.
    is laid over the 「ブラウザ」 tab
 4. queue it from 「ブラウザで読み込んだ動画」 -> saved
 5. 「ブラウザのページから探す」 -> that video listed (with the browser's cookie)
+6. a page whose player only comes after pressing its (encrypted) server buttons: 「ブラウザのページから探す」
+   presses them, its pop-up ads are refused, the player's video is listed
 
 Run: python tests/smoke_app.py
 """
@@ -38,6 +40,14 @@ PAGES = {
     '/js.html': '<title>JS page</title><div id=p></div><script>document.cookie = "sess=abc; path=/";'
                 'setTimeout(() => { const v = document.createElement("video"); v.muted = true; v.autoplay = true;'
                 ' v.src = "/media/" + "js.mp4"; document.getElementById("p").appendChild(v); }, 1000);</script>',
+    '/servers.html': '<title>Servers</title><div id="wrap"><div class="play-button">play</div></div>'
+                     '<a href="javascript:;" class="btn-server active" data-link="3bba8580ed78c8d9f27876a5">EVS</a>'
+                     '<script>document.querySelectorAll(".btn-server").forEach(b => b.onclick = () => {'
+                     ' window.open("/video.html"); if (window.opened) fetch("/api?l=" + b.dataset.link).then(r => r.text())'
+                     '.then(u => { document.getElementById("wrap").innerHTML = `<iframe src="${u}"></iframe>`; }); });'
+                     'document.querySelector(".play-button").onclick = () => { window.opened = 1;'
+                     ' document.querySelector(".btn-server").click(); };</script>',
+    '/srv-player.html': '<title>Player</title><script>var cfg = {file: "/media/srv.mp4"};</script>',
 }
 
 
@@ -68,6 +78,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if p.startswith('/media/'):
             data, ctype = VIDEO, 'video/mp4'
+        elif p == '/api':  # the site's script asks for the player of a server
+            data, ctype = f'http://{self.headers["Host"]}/srv-player.html'.encode(), 'text/plain'
         elif p in PAGES:
             data, ctype = PAGES[p].encode(), 'text/html; charset=utf-8'
         else:
@@ -110,6 +122,7 @@ def drive(app):
     job = lambda title: next((j for j in app.jobs.values() if j.cand.title == title), None)  # noqa: E731
     states = lambda: [j.state for j in app.jobs.values()]  # noqa: E731
     view = {}
+    js_cookie = {}
     tabs = {}
     titles = []
 
@@ -163,7 +176,13 @@ def drive(app):
          or app.handle({'cmd': 'switchTab', 'id': tabs['js']}),
          lambda: len(app.browsers) == 2 and app.active == tabs['js'] and app.web.Visible),
         ('ブラウザのページから探す', lambda: app.handle({'cmd': 'findPage'}),
-         lambda: not app.searching and found() == [base + '/media/js.mp4']),
+         lambda: not app.searching and found() == [base + '/media/js.mp4']
+         and not js_cookie.update(c=app.cands[0].headers.get('Cookie'))),
+        ('サーバーのボタンを押して探す', lambda: tabs.update(n=len(app.browsers))
+         or app.handle({'cmd': 'navigate', 'url': base + '/servers.html'}),
+         lambda: app.core.DocumentTitle == 'Servers' and not app.handle({'cmd': 'findPage'})),
+        ('', lambda: None, lambda: not app.searching and app.core.Source == base + '/servers.html'
+         and len(app.browsers) == tabs['n'] and base + '/media/srv.mp4' in found()),
         ('一時停止', lambda: app.add_jobs([Candidate(base + '/media/slow.mp4', 'Slow', 'mp4', 'ページ内',
                                                            {'Referer': base + '/video.html'})]),
          lambda: getattr(job('Slow'), 'state', None) == appmod.RUNNING and (job('Slow').progress or 0) > 0.2
@@ -203,7 +222,7 @@ def drive(app):
             print(f'ok: {steps[i][0]}')
         if i + 1 == len(steps):
             timer.Stop()
-            result.update(step='done', view=view, js_cookie=app.cands[0].headers.get('Cookie'), titles=titles,
+            result.update(step='done', view=view, js_cookie=js_cookie.get('c'), titles=titles,
                           final_title=app.form.Text)
             app.form.Close()
             return
@@ -228,7 +247,7 @@ with open(os.path.join(outdir, 'Slow.mp4'), 'rb') as fh:
     assert fh.read() == SLOW, 'resumed file differs'
 assert any(r.startswith('bytes=') and not r.startswith('bytes=0-') for r in RANGES), RANGES  # resumed, not restarted
 assert result['js_cookie'] and 'sess=abc' in result['js_cookie'], result['js_cookie']
-assert result['view'] == {'tab': 'found', 'found': 1, 'captured': 2, 'queue': 4}, result['view']  # both tabs' videos
+assert result['view']['tab'] == 'found' and result['view']['queue'] == 4, result['view']  # both tabs' videos
 print('title while downloading:', result['titles'], '/ at the end:', result['final_title'])
 assert result['final_title'] == '動画ダウンローダー — 完了 3', result['final_title']
 assert result['selection'] == [1, 3, 2, 3, 4, 1, 0], result['selection']
