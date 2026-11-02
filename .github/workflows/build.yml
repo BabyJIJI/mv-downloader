@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: pip install -r requirements.txt pytest
+      - run: pip install -r requirements.txt pytest playwright && python -m playwright install --with-deps chromium
       - run: python -m pytest -q tests
 
   windows:

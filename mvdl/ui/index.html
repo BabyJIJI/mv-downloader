@@ -550,6 +550,12 @@ const handlers = {
         'ブラウザのタブで開きます。確認を通って動画を再生したら「ブラウザのページから探す」を押してください。',
         () => send('openInBrowser', {url: m.url}));
   },
+  needsBrowser(m) {
+    ask('動画はサーバーのボタンを押すと出るページです',
+        `サーバーのボタン（${m.servers.join('、')}）の URL は暗号化されていて、ページの HTML からは読めません。`
+        + 'ブラウザのタブで開きます。ページが表示されたら「ブラウザのページから探す」を押してください（ボタンを順に押してプレーヤーを探します）。',
+        () => send('openInBrowser', {url: m.url}));
+  },
   browserFailed(m) { $('#browser-slot').textContent = m.text; },
 };
 window.chrome?.webview?.addEventListener('message', e => handlers[e.data.type]?.(e.data));
