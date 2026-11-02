@@ -46,6 +46,9 @@ SWITCH_LABEL_MAX = 40
 # `getElementById('norobotlink').innerHTML = '//host/get_video?id=..&token=' + ('xyztok').substring(1).substring(2)`
 SPLIT_LINK_RE = re.compile(
     r'''innerHTML\s*=\s*(['"])([^'"]*)\1\s*\+\s*\(?\s*(['"])([^'"]*)\3\s*\)?((?:\.substr(?:ing)?\(\d+\))*)''')
+# a page that only sends the browser on (a site's "jump" page in front of the player host)
+JS_REDIRECT_RE = re.compile(
+    r'''(?:\blocation(?:\.href)?\s*=\s*|\blocation\.(?:replace|assign)\(\s*)["']((?:https?:)?//[^"'\s]+|/[^"'\s/][^"'\s]*)["']''')
 MAX_FRAMES = 12       # player pages followed per search
 MAX_FRAME_DEPTH = 2   # a page -> its player iframe -> the iframe inside that
 
@@ -241,6 +244,7 @@ class _PageParser(html.parser.HTMLParser):
         self.media, self.iframes, self.title, self._in_title = [], [], '', False
         self._in_video = 0  # <source> also appears in <audio> and <picture>
         self.switches = []  # [label, value] of server buttons (SWITCH_ATTRS)
+        self.redirects = []  # where the page sends the browser on (meta refresh)
         self._switch = None  # (tag, entry) whose label text is being read
 
     def handle_starttag(self, tag, attrs):
@@ -269,6 +273,10 @@ class _PageParser(html.parser.HTMLParser):
                 self.iframes.append(a['content'])  # may be a player page (YouTube embed, ...)
             elif key == 'og:title' and a.get('content') and not self.title:
                 self.title = a['content']
+            elif (a.get('http-equiv') or '').lower() == 'refresh':  # <meta http-equiv="refresh" content="0;url=...">
+                m = re.search(r'url\s*=\s*["\']?([^"\'\s;]+)', a.get('content') or '', re.I)
+                if m:
+                    self.redirects.append(m.group(1))
         elif tag == 'title':
             self._in_title = True
 
@@ -454,6 +462,9 @@ def scan_html(text, page_url, log, headers, title=None, _state=None, servers=())
         state['locked'] += locked
         log(f'サーバーの切り替えボタン（{", ".join(locked)}）の URL は暗号化されていて、ページの HTML からは読めません')
     frames += [('', u) for u in p.iframes]
+    # a jump page (meta refresh, location.href = ...): what it leads to is opened like an iframe
+    frames += [('', u) for u in [*p.redirects, *JS_REDIRECT_RE.findall(script)]
+               if _ext(u) in ('html', 'htm') or _ext(u) not in NOT_MEDIA_EXT]
     out = []
     for raw in found:
         u = urllib.parse.urljoin(page_url, raw.strip())

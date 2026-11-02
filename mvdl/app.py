@@ -465,13 +465,18 @@ class App:
 
     def on_new_window(self, tab, e):
         """A link to a new tab / window.open: open it as another tab, as that very window (window.opener
-        and sign-in pop-ups keep working), so its videos are seen too."""
+        and sign-in pop-ups keep working), so its videos are seen too. It opens behind the tab shown:
+        video sites open ad pop-ups on the first click on the player, and the search must stay on the
+        video's page."""
         if tab.probing:  # an ad pop-up of a server button
             e.Handled = True
             return
         deferral = e.GetDeferral()
-        if not self.new_tab(new_window=(e, deferral)):
+        if not self.new_tab(new_window=(e, deferral), activate=False):
             deferral.Complete()
+            return
+        self.log(f'新しいタブを裏で開きました（広告かもしれません）: {e.Uri}')
+        self.send('toast', text='新しいタブを裏で開きました（上のタブから切り替えられます）')
 
     def navigate(self, url, tab=None):
         url = normalized(url)

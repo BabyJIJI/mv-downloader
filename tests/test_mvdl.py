@@ -115,6 +115,12 @@ PAGES = {
                      b'  opened = true; load(document.querySelector(".btn-server.active")); };'
                      b'</script></body></html>',
     '/ad.html': b'<html><body>ad</body></html>',
+    # the site's jump page in front of the player host (like rep.php?l=...): sends the browser on
+    '/jump-outer.html': b'<html><head><title>Jump</title></head><body>'
+                        b'<iframe src="/jump.php?l=3bba85&bg=x"></iframe><iframe src="/meta-jump.html"></iframe></body></html>',
+    '/jump.php': b'<html><body><script>setTimeout(function () { window.location.replace("/player.html"); }, 0);'
+                 b'</script></body></html>',
+    '/meta-jump.html': b'<html><head><meta http-equiv="refresh" content="0; URL=\'/deep3.html\'"></head></html>',
     '/popup.html': b'<html><body>pop-up ad</body></html>',
     # server buttons that only hide the URL a little: base64, hex of an <iframe> tag, plain
     '/servers-plain.html': b'<html><head><title>Plain</title></head><body>'
@@ -573,3 +579,11 @@ def test_server_script_presses_the_buttons(server):
     finally:
         browser.close()
         p.stop()
+
+
+def test_jump_pages_followed(server, check_mode):
+    """A player iframe that is only a jump page (location.replace / meta refresh) is followed to the player."""
+    found = find_in_html(server + '/jump-outer.html', print)
+    assert sorted(c.url for c in found) == [server + '/media/clip.mp4', server + '/media/guarded',
+                                            server + '/media/hlsstream']
+    assert all(c.title == 'Jump' for c in found)
