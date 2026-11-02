@@ -47,7 +47,7 @@ PAGES = {
                      '.then(u => { document.getElementById("wrap").innerHTML = `<iframe src="${u}"></iframe>`; }); });'
                      'document.querySelector(".play-button").onclick = () => { window.opened = 1;'
                      ' document.querySelector(".btn-server").click(); };</script>',
-    '/srv-player.html': '<title>Player</title><script>var cfg = {file: "/media/srv.mp4"};</script>',
+    '/srv-player.html': '<title>Player</title><video src="/media/srv.mp4"></video>',
 }
 
 
