@@ -4,7 +4,8 @@ WebView2 laid over the page's 「ブラウザ」 tab. They talk over postMessage
 
 「URL から探す」 looks at a URL with yt-dlp and the page's HTML. The built-in browser is for pages that need
 a person: pass Cloudflare, log in, play the video, then 「ブラウザのページから探す」. While browsing, the
-browser only reports what it loaded (capture.py); the page is not touched until the button is pressed.
+browser only reports what it loaded (capture.py); the page is not touched until the button is pressed
+(then the page's server buttons are pressed in turn when it has them: servers.py).
 WinForms + WebView2 through pythonnet; Windows only.
 """
 import itertools
@@ -20,10 +21,10 @@ from concurrent.futures import ThreadPoolExecutor
 import clr  # pythonnet
 
 from . import __version__
-from . import probe
+from . import probe, servers
 from .capture import Capture, is_media
 from .downloader import QUALITIES, Cancelled, download
-from .finder import Blocked, find_in_page, find_videos, fmt_duration, fmt_size, kind_of
+from .finder import Blocked, NeedsBrowser, find_in_page, find_videos, fmt_duration, fmt_size, kind_of
 from .jobs import (CANCELLED, DONE, FAILED, PAUSED, RESTORED, RUNNING, UNFINISHED, WAITING, Job, load_queue,
                    remove_partials, save_queue)
 from .tools import find_tool
@@ -97,6 +98,7 @@ class BrowserTab:
         self.app, self.id = app, tid
         self.capture = Capture()
         self.core = None
+        self.probing = False  # pressing the page's server buttons: no pop-ups, no leaving the page
         self.url, self.new_window = url, new_window  # what to show once ready
         self.web = WebView2()
         self.web.Visible = False
@@ -423,6 +425,9 @@ class App:
             self.send('pageUrl', url=tab.source)  # the console's URL follows the page shown
 
     def on_navigation(self, tab, e):
+        if tab.probing:  # a server button tried to leave the page
+            e.Cancel = True
+            return
         if not e.IsRedirected:  # a new page: what the previous one loaded no longer counts
             tab.capture.reset()
             for key in [k for k in self.checked if k[0] == tab.id]:
@@ -461,6 +466,9 @@ class App:
     def on_new_window(self, tab, e):
         """A link to a new tab / window.open: open it as another tab, as that very window (window.opener
         and sign-in pop-ups keep working), so its videos are seen too."""
+        if tab.probing:  # an ad pop-up of a server button
+            e.Handled = True
+            return
         deferral = e.GetDeferral()
         if not self.new_tab(new_window=(e, deferral)):
             deferral.Complete()
@@ -536,6 +544,8 @@ class App:
                 self.q.put(('found', find_videos(url, log)))
             except Blocked:
                 self.q.put(('blocked', url))
+            except NeedsBrowser as nb:
+                self.q.put(('needsBrowser', (nb.url, nb.servers)))
             except Exception as e:  # noqa: BLE001 - shown to the user
                 self.q.put(('log', f'エラー: {e}'))
                 self.q.put(('found', []))
@@ -543,7 +553,8 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def find_page(self):
-        """The page open in the browser: what it loaded, its DOM now, and yt-dlp with its cookies."""
+        """The page open in the browser: its server buttons pressed in turn (when it has them), what it
+        loaded, its DOM then, and yt-dlp with its cookies."""
         if self.searching:
             return
         tab = self.tab
@@ -553,9 +564,78 @@ class App:
             self.status('「ブラウザ」タブでページを開いてから押してください')
             self.send('tab', name='browser')
             return
-        title, ua = core.DocumentTitle, core.Settings.UserAgent
         self.set_searching(True)
         self.log(f'--- {page_url}（ブラウザ）')
+        tab.probing = True
+        start = core.ExecuteScriptAsync(servers.SCRIPT)
+
+        def started():
+            n = 0
+            if not start.IsFaulted:
+                try:
+                    n = int(json.loads(start.Result) or 0)
+                except (ValueError, TypeError):
+                    pass
+            if not n:
+                tab.probing = False
+                self.find_page_now(tab, page_url, [])
+                return
+            self.log(f'サーバーの切り替えボタンが {n} 個あります。順に押してプレーヤーを開きます…')
+            self.send('busy', on=True, text=f'サーバーのボタンを順に押しています（{n} 個）…')
+            self.poll_servers(tab, page_url, time.time() + servers.TIMEOUT_S)
+
+        self.when_done([start], started)
+
+    def poll_servers(self, tab, page_url, deadline):
+        """Wait (without blocking the UI) for servers.SCRIPT to finish on the page."""
+        if self.browsers.get(tab.id) is not tab or not tab.core:
+            tab.probing = False
+            self.set_searching(False)
+            return
+        task = tab.core.ExecuteScriptAsync(servers.RESULT)
+
+        def ready():
+            result = None
+            if not task.IsFaulted:
+                try:
+                    result = json.loads(json.loads(task.Result) or 'null')
+                except (ValueError, TypeError):
+                    pass
+            if result is not None and not result.get('done') and time.time() < deadline:
+                self.later(400, lambda: self.poll_servers(tab, page_url, deadline))
+                return
+            tab.probing = False
+            if result is None or not result.get('done'):
+                self.log('サーバーのボタンを押し終わりませんでした（ここまでの分で探します）')
+            if result and result.get('error'):
+                self.log(f'サーバーのボタンを押せませんでした: {result["error"]}')
+            for item in (result or {}).get('items') or []:
+                if not item.get('urls'):
+                    self.log(f'サーバー「{item.get("label") or "?"}」: 押してもプレーヤーは出ませんでした')
+            self.find_page_now(tab, page_url, servers.players(result))
+
+        self.when_done([task], ready)
+
+    def later(self, ms, fn):
+        timer = Timer()
+        timer.Interval = ms
+        self.timers.add(timer)
+
+        def tick(s, e):
+            timer.Stop()
+            self.timers.discard(timer)
+            fn()
+
+        timer.Tick += tick
+        timer.Start()
+
+    def find_page_now(self, tab, page_url, players):
+        core = tab.core
+        if self.browsers.get(tab.id) is not tab or not core:
+            self.set_searching(False)
+            return
+        self.send('busy', on=True, text='探しています…')
+        title, ua = core.DocumentTitle, core.Settings.UserAgent
         html_task = core.ExecuteScriptAsync('document.documentElement.outerHTML')  # the page as it is now
 
         def with_cookies(cookies):
@@ -571,7 +651,7 @@ class App:
 
             def work():
                 try:
-                    self.q.put(('found', find_in_page(page_url, title, html, captured, headers, log)))
+                    self.q.put(('found', find_in_page(page_url, title, html, captured, headers, log, players)))
                 except Exception as e:  # noqa: BLE001 - shown to the user
                     self.q.put(('log', f'エラー: {e}'))
                     self.q.put(('found', []))
@@ -607,6 +687,11 @@ class App:
                     self.set_searching(False)
                     self.status('Cloudflare の確認画面（ボット対策）で止められました')
                     self.send('blocked', url=v)
+                elif kind == 'needsBrowser':
+                    self.set_searching(False)
+                    url, names = v
+                    self.status('動画の URL は、サーバーのボタンを押したときにサイトのスクリプトが作ります')
+                    self.send('needsBrowser', url=url, servers=names)
                 elif kind == 'checked':
                     tab, m, c, note = v
                     if self.browsers.get(tab.id) is tab and tab.capture.media.get(m.url) is m:  # still that page

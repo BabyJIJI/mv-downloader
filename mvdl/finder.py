@@ -5,8 +5,13 @@
   `eval(function(p,a,c,k,e,d)...)` ones and player configs like `file: "https://..."`), iframes that
   yt-dlp has an extractor for (YouTube / Vimeo embeds, ...), and the other iframes (player pages of
   hosts yt-dlp does not know), whose HTML is scanned the same way
+- server / mirror buttons (`<a data-link="...">EVS</a>`): their player URL when it is written plainly,
+  in base64 or in hex; when it is encrypted (only the site's script can turn it into the player), the
+  built-in browser clicks each button and takes the player it opens (app.py, SERVER_SCRIPT)
 - (capture.py) the media requests the built-in browser made while the user watched the page
 """
+import base64
+import binascii
 import html.parser
 import re
 import urllib.parse
@@ -33,7 +38,15 @@ PLAYER_URL_RE = re.compile(
 NOT_MEDIA_EXT = ('js', 'css', 'json', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'woff', 'woff2', 'ttf',
                  'vtt', 'srt', 'ass', 'xml', 'txt', 'html', 'htm', 'mp3', 'aac', 'm4a', 'ogg', 'opus', 'wav')
 PACKED_RE = re.compile(r'''eval\(function\(p,a,c,k,e,[rd]\).*?\.split\(['"]\|['"]\)[^)]*\)\)''', re.S)
-MAX_FRAMES = 8        # player pages followed per search
+# attributes of server / mirror switchers that hold the player (a URL, an <iframe>, or that encoded)
+SWITCH_ATTRS = ('data-link', 'data-embed', 'data-iframe', 'data-player', 'data-server', 'data-video',
+                'data-stream', 'data-mirror', 'data-hash')
+SWITCH_LABEL_MAX = 40
+# Streamtape and the hosts that copy it: the link is written by a script, split up to keep bots out:
+# `getElementById('norobotlink').innerHTML = '//host/get_video?id=..&token=' + ('xyztok').substring(1).substring(2)`
+SPLIT_LINK_RE = re.compile(
+    r'''innerHTML\s*=\s*(['"])([^'"]*)\1\s*\+\s*\(?\s*(['"])([^'"]*)\3\s*\)?((?:\.substr(?:ing)?\(\d+\))*)''')
+MAX_FRAMES = 12       # player pages followed per search
 MAX_FRAME_DEPTH = 2   # a page -> its player iframe -> the iframe inside that
 
 
@@ -130,6 +143,15 @@ class Blocked(Exception):
     """The site's bot check (Cloudflare) refused us: only a visible browser, with the user, can get in."""
 
 
+class NeedsBrowser(Exception):
+    """Nothing found, and the page's server buttons are encrypted: only the site's script, in the
+    browser, turns them into the player."""
+
+    def __init__(self, url, servers):
+        super().__init__(url)
+        self.url, self.servers = url, servers
+
+
 def find_with_ytdlp(url, log, headers=None):
     opts = ydl_base_opts(Logger(log)) | {'skip_download': True, 'extract_flat': 'in_playlist',
                                          'playlistend': 500, 'ignoreerrors': 'only_download'}
@@ -218,9 +240,18 @@ class _PageParser(html.parser.HTMLParser):
         super().__init__(convert_charrefs=True)
         self.media, self.iframes, self.title, self._in_title = [], [], '', False
         self._in_video = 0  # <source> also appears in <audio> and <picture>
+        self.switches = []  # [label, value] of server buttons (SWITCH_ATTRS)
+        self._switch = None  # (tag, entry) whose label text is being read
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
+        if tag not in ('iframe', 'embed', 'video', 'source', 'img', 'script', 'link', 'meta'):
+            value = next((a[k] for k in SWITCH_ATTRS if a.get(k)), None)
+            if value:
+                entry = [a.get('title') or a.get('aria-label') or '', value.strip()]
+                self.switches.append(entry)
+                if not entry[0]:
+                    self._switch = (tag, entry)
         if tag == 'video':
             self._in_video += 1
         if tag == 'video' or (tag == 'source' and self._in_video):
@@ -242,14 +273,69 @@ class _PageParser(html.parser.HTMLParser):
             self._in_title = True
 
     def handle_endtag(self, tag):
+        if self._switch and self._switch[0] == tag:
+            self._switch = None
         if tag == 'video' and self._in_video:
             self._in_video -= 1
         if tag == 'title':
             self._in_title = False
 
     def handle_data(self, data):
+        if self._switch:
+            entry = self._switch[1]
+            entry[0] = (entry[0] + ' ' + data.strip()).strip()[:SWITCH_LABEL_MAX]
         if self._in_title and not self.title:
             self.title = data.strip()
+
+
+def _url_in(text):
+    """The player URL a decoded switcher value gives: the value itself, or the src of the <iframe> it is."""
+    text = text.strip()
+    m = re.search(r'''<(?:iframe|embed|video|source)[^>]+?src\s*=\s*["']?([^"'\s>]+)''', text, re.I)
+    if m:
+        text = m.group(1)
+    text = html.unescape(text)
+    if re.fullmatch(r'''(?:https?:)?//[^\s"'<>]+''', text):
+        return text
+    return None
+
+
+def decode_link(value):
+    """The URL in a server button's value: plain, %-escaped, base64 or hex (also of an <iframe> tag).
+    None when it is encrypted (only the site's own script can read it)."""
+    v = (value or '').strip()
+    if not v:
+        return None
+    tries = [v, urllib.parse.unquote(v)]
+    if re.fullmatch(r'[0-9a-fA-F]+', v) and len(v) % 2 == 0:
+        try:
+            tries.append(binascii.unhexlify(v).decode('utf-8'))
+        except (ValueError, UnicodeDecodeError):
+            pass
+    if re.fullmatch(r'[A-Za-z0-9+/_-]+=*', v) and len(v) >= 12:
+        for dec in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                tries.append(dec(v + '=' * (-len(v) % 4)).decode('utf-8'))
+            except (ValueError, UnicodeDecodeError):
+                pass
+    for t in tries:
+        u = _url_in(t)
+        if u:
+            return u
+    return None
+
+
+def split_links(text):
+    """Links a player page puts together in its script (SPLIT_LINK_RE)."""
+    out = []
+    for m in SPLIT_LINK_RE.finditer(text):
+        tail = m.group(4)
+        for n in re.findall(r'\((\d+)\)', m.group(5)):
+            tail = tail[int(n):]
+        u = m.group(2) + tail
+        if re.match(r'(?:https?:)?//[^\s/]+/', u):
+            out.append(u)
+    return out
 
 
 def fetch_page(url, log, headers=None):
@@ -289,7 +375,11 @@ def find_in_html(url, log):
         if is_cloudflare_block(e):
             raise Blocked() from e
         return []
-    return _checked(scan_html(text, final, log, {'Referer': final}), log)
+    state = new_state()
+    found = _checked(scan_html(text, final, log, {'Referer': final}, _state=state), log)
+    if not found and state['locked']:
+        raise NeedsBrowser(final, state['locked'])
+    return found
 
 
 def unpack_scripts(text):
@@ -326,12 +416,20 @@ def _frame_headers(headers, page_url, frame_url):
     return h | {'Referer': page_url}
 
 
-def scan_html(text, page_url, log, headers, title=None, _state=None):
+def new_state():
+    """What one search has done so far: URLs seen, player pages opened, server buttons it could not read."""
+    return {'seen': set(), 'frames': 0, 'depth': 0, 'locked': []}
+
+
+def scan_html(text, page_url, log, headers, title=None, _state=None, servers=()):
     """Media URLs in an HTML document (<video>, og:video, URLs inside scripts, player configs) and the
     embedded players: those yt-dlp knows (YouTube / Vimeo iframes, ...) go to yt-dlp, the other iframes
     are loaded and scanned the same way (up to MAX_FRAMES, MAX_FRAME_DEPTH deep). Not checked yet: see
-    _checked()."""
-    state = _state if _state is not None else {'seen': set(), 'frames': 0, 'depth': 0}
+    _checked().
+
+    servers: [(label, player URL)] the browser got by clicking the page's server buttons; they and the
+    server buttons we can read go first (ad iframes must not use up MAX_FRAMES)."""
+    state = _state if _state is not None else new_state()
     seen = state['seen']
     p = _PageParser()
     try:
@@ -342,6 +440,20 @@ def scan_html(text, page_url, log, headers, title=None, _state=None):
     script = unpack_scripts(text)
     found = [*p.media, *MEDIA_URL_RE.findall(script)]
     found += [u for u in PLAYER_URL_RE.findall(script) if _ext(u) not in NOT_MEDIA_EXT]
+    joined = split_links(script)
+    found = [u for u in found if not any(j != u and j.startswith(u) for j in joined)] + joined  # not half a link
+    frames = [(label, u) for label, u in servers]
+    locked = []
+    for label, value in p.switches:
+        u = decode_link(value)
+        if u:
+            frames.append((label, u))
+        elif len(value) >= 16 and re.fullmatch(r'[A-Za-z0-9+/=_%.:-]+', value) and not value.isdigit():
+            locked.append(label or value[:12] + '…')  # encrypted (not an ID or a name)
+    if locked:
+        state['locked'] += locked
+        log(f'サーバーの切り替えボタン（{", ".join(locked)}）の URL は暗号化されていて、ページの HTML からは読めません')
+    frames += [('', u) for u in p.iframes]
     out = []
     for raw in found:
         u = urllib.parse.urljoin(page_url, raw.strip())
@@ -349,14 +461,23 @@ def scan_html(text, page_url, log, headers, title=None, _state=None):
             continue
         seen.add(u)
         out.append(Candidate(u, title, kind_of(u), 'ページ内', dict(headers)))
-    for raw in p.iframes:
+    for label, raw in frames:
         u = urllib.parse.urljoin(page_url, raw.strip())
         if u in seen or not u.startswith('http'):
             continue
         seen.add(u)
+        ftitle = f'{title}（{label}）' if label else title
+        if label:
+            log(f'サーバー「{label}」のプレーヤー: {u}')
         if has_site_extractor(u):
             log(f'埋め込みプレーヤーを調べています: {u}')
-            out += find_with_ytdlp(u, log, {'Referer': page_url})
+            found_here = find_with_ytdlp(u, log, {'Referer': page_url})
+            for c in found_here:
+                c.title = ftitle if label else c.title
+            out += found_here
+            continue
+        if _ext(u) in MEDIA_EXT:  # the button gives the video itself
+            out.append(Candidate(u, ftitle, kind_of(u), 'ページ内', dict(headers)))
             continue
         if _ext(u) in MEDIA_EXT or _ext(u) in NOT_MEDIA_EXT and _ext(u) not in ('html', 'htm'):
             continue  # a media file is in the list above already; images / scripts are no player
@@ -374,11 +495,12 @@ def scan_html(text, page_url, log, headers, title=None, _state=None):
         state['depth'] += 1
         try:
             # what the player page loads is requested with it as Referer (player hosts check that)
-            in_frame = scan_html(frame_text, final, log, h | {'Referer': final}, title, state)
+            in_frame = scan_html(frame_text, final, log, h | {'Referer': final}, ftitle, state)
         finally:
             state['depth'] -= 1
         if not in_frame:
-            log(f'埋め込みページに動画の URL は見つかりませんでした: {u}')
+            log(f'埋め込みページに動画の URL は見つかりませんでした: {u}'
+                + ('（ブラウザでこのサーバーを選んで再生すると「ブラウザで読み込んだ動画」に出ます）' if label else ''))
         out += in_frame
     return out
 
@@ -394,12 +516,13 @@ def _checked(cands, log):
     return out
 
 
-def find_in_page(page_url, title, html, captured, headers, log):
+def find_in_page(page_url, title, html, captured, headers, log, servers=()):
     """「このページの動画を探す」 in the built-in browser.
 
     captured: Candidates for the media the browser loaded (capture.Capture.candidates()).
     html:     the page's DOM as it is now (after JavaScript).
     headers:  Cookie / User-Agent of the browser, for yt-dlp and the checks.
+    servers:  [(label, player URL)] opened by clicking the page's server buttons (app.py SERVER_SCRIPT).
     """
     out = []
     if has_site_extractor(page_url):
@@ -410,8 +533,8 @@ def find_in_page(page_url, title, html, captured, headers, log):
             log('yt-dlp はサイトの確認画面で止められました（ブラウザで読み込んだ動画から探します）')
     log(f'ページ内と、ブラウザが読み込んだ動画（{len(captured)} 件）を調べています…')
     out += captured
-    if html:
-        out += scan_html(html, page_url, log, headers | {'Referer': page_url})
+    if html or servers:
+        out += scan_html(html or '', page_url, log, headers | {'Referer': page_url}, servers=servers)
     for c in out:
         if c.title == c.url or not c.title:
             c.title = title or page_url
@@ -419,7 +542,8 @@ def find_in_page(page_url, title, html, captured, headers, log):
 
 
 def find_videos(url, log):
-    """Without the browser: yt-dlp, then our own look at the HTML. Raises Blocked on a bot check."""
+    """Without the browser: yt-dlp, then our own look at the HTML. Raises Blocked on a bot check, and
+    NeedsBrowser when the player is behind encrypted server buttons."""
     log('yt-dlp で調べています…')
     found = find_with_ytdlp(url, log)
     if found:
