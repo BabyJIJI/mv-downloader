@@ -51,7 +51,12 @@ jobs:
           $p = Start-Process dist\mvdl.exe -PassThru
           if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'mvdl.exe did not finish starting' }
           if (-not (Test-Path $env:MVDL_STARTUP_CHECK)) { throw "mvdl.exe exited ($($p.ExitCode)) before its browser came up" }
-          "WebView2: $(Get-Content $env:MVDL_STARTUP_CHECK)"
+          $check = Get-Content $env:MVDL_STARTUP_CHECK
+          "WebView2: $($check -join "`n")"
+          # yt-dlp in the exe: curl_cffi bundled, HTTPS works (plain and as Chrome)
+          if (-not ($check -match '^handlers: .*CurlCFFI')) { throw 'curl_cffi is not in the exe' }
+          if (-not ($check -match '^https: ok')) { throw 'HTTPS requests fail in the exe' }
+          if (-not ($check -match '^https-impersonate: ok')) { throw 'HTTPS requests as Chrome (curl_cffi) fail in the exe' }
       - name: Which release (a v* tag, or a version on main that has no release yet)
         id: rel
         shell: pwsh

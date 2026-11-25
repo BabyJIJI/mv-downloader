@@ -74,3 +74,21 @@ def ydl_base_opts(logger):
     if deno:
         opts['js_runtimes'] = {'deno': {'path': deno}}
     return opts
+
+
+def network_check(url='https://github.com/robots.txt'):
+    """Build check of the exe: which request handlers yt-dlp has (CurlCFFI must be bundled) and whether an
+    HTTPS request goes through, plainly and impersonating Chrome. Lines of text."""
+    import yt_dlp
+    from yt_dlp.networking import Request
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+    lines = []
+    with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
+        lines.append('handlers: ' + ', '.join(ydl._request_director.handlers))
+        for name, ext in (('https', {}), ('https-impersonate', {'impersonate': ImpersonateTarget('chrome')})):
+            try:
+                with ydl.urlopen(Request(url, extensions=ext)) as r:
+                    lines.append(f'{name}: ok {r.status}')
+            except Exception as e:  # noqa: BLE001 - reported to the build
+                lines.append(f'{name}: failed {type(e).__name__}: {e}')
+    return lines

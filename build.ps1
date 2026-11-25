@@ -17,7 +17,7 @@ if ($LASTEXITCODE) { throw 'pip install failed' }
 if ($LASTEXITCODE) { throw 'fetch_webview2 failed' }
 
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name mvdl `
-    --collect-all yt_dlp_ejs --collect-all pythonnet --collect-all clr_loader `
+    --collect-all yt_dlp_ejs --collect-all curl_cffi --collect-all pythonnet --collect-all clr_loader `
     --add-data 'mvdl/lib;mvdl/lib' --add-data 'mvdl/ui;mvdl/ui' mvdl.py
 if ($LASTEXITCODE) { throw 'PyInstaller failed' }
 

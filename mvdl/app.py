@@ -27,7 +27,7 @@ from .downloader import QUALITIES, Cancelled, download
 from .finder import Blocked, NeedsBrowser, find_in_page, find_videos, fmt_duration, fmt_size, kind_of
 from .jobs import (CANCELLED, DONE, FAILED, PAUSED, RESTORED, RUNNING, UNFINISHED, WAITING, Job, load_queue,
                    remove_partials, save_queue)
-from .tools import find_tool
+from .tools import find_tool, network_check
 
 clr.AddReference('System.Windows.Forms')
 clr.AddReference('System.Drawing')
@@ -276,7 +276,7 @@ class App:
             self.log(f'ブラウザ: WebView2 {tab.core.Environment.BrowserVersionString}')
             if os.environ.get('MVDL_STARTUP_CHECK'):  # build check: the exe starts and its browser comes up
                 with open(os.environ['MVDL_STARTUP_CHECK'], 'w', encoding='utf-8') as fh:
-                    fh.write(tab.core.Environment.BrowserVersionString)
+                    fh.write('\n'.join([tab.core.Environment.BrowserVersionString, *network_check()]))
                 self.form.Close()
                 return
         self.tab_changed(tab)

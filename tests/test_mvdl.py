@@ -587,3 +587,11 @@ def test_jump_pages_followed(server, check_mode):
     assert sorted(c.url for c in found) == [server + '/media/clip.mp4', server + '/media/guarded',
                                             server + '/media/hlsstream']
     assert all(c.title == 'Jump' for c in found)
+
+
+def test_curl_cffi_is_a_request_handler():
+    """requirements.txt brings curl_cffi: yt-dlp gets a fourth way to send HTTPS (and to look like Chrome)."""
+    from mvdl.tools import network_check
+    lines = network_check('http://127.0.0.1:9/')  # nothing listens: only the handler list matters here
+    assert lines[0].startswith('handlers: ') and 'CurlCFFI' in lines[0], lines
+    assert [line.split(':')[0] for line in lines[1:]] == ['https', 'https-impersonate']
